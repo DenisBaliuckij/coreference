@@ -1,0 +1,6 @@
+networkx>=3.0
+numpy>=1.21.0
+scipy>=1.10.0
+smatch>=1.0.4
+coval @ git+https://github.com/ns-moosavi/coval.git
+pytest>=7.0.0
