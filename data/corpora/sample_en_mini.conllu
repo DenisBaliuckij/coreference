@@ -1,0 +1,10 @@
+# newdoc id = sample1
+# sent_id = sample1-1
+1	John	John	PROPN	_	_	2	nsubj	_	Entity=(e1-person-1-new-1-sgl-1)
+2	arrived	arrive	VERB	_	_	0	root	_	SpaceAfter=No
+3	.	.	PUNCT	_	_	2	punct	_	_
+
+# sent_id = sample1-2
+1	He	he	PRON	_	_	2	nsubj	_	Entity=(e1)
+2	left	leave	VERB	_	_	0	root	_	SpaceAfter=No
+3	.	.	PUNCT	_	_	2	punct	_	_
