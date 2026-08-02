@@ -17,7 +17,7 @@ def add_text_corpuses_processing_to_path() -> Path:
     if override:
         dags_dir = Path(override)
     else:
-        dags_dir = Path(__file__).resolve().parents[1] / "text-corpuses-processing" / "dags"
+        dags_dir = Path(__file__).resolve().parents[2] / "text-corpuses-processing" / "dags"
 
     dags_str = str(dags_dir)
     if dags_str not in sys.path:
