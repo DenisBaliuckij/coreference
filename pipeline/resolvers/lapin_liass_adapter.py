@@ -41,6 +41,7 @@ class LapinLiassAdapter:
                 if span is not None:
                     projected.append(span)
             if len(projected) >= 2:
+                # uf.groups() yields insertion order, not token-position order; sort for determinism
                 projected.sort(key=lambda s: s.start_token)
                 clusters.append(projected)
 
