@@ -29,6 +29,32 @@ def test_empty_system_output_scores_zero():
     assert result["conll_f1"] == 0.0
 
 
+def test_gold_singleton_clusters_are_stripped_before_scoring():
+    """CoNLL-2012 convention: singleton KEY clusters are removed before scoring.
+
+    The CorefUD loader keeps every annotated mention, including clusters of
+    size 1. Resolvers structurally cannot emit singletons, so leaving gold
+    singletons in deflates every metric: a resolver that perfectly recovers
+    the one real coreference link scored ~0.657 instead of 1.0.
+    """
+    gold = [
+        _cluster((0, 0), (5, 5)),  # the one real coreference chain
+        _cluster((2, 2)),          # singleton: annotated mention, no partner
+        _cluster((7, 7)),          # singleton
+        _cluster((9, 9)),          # singleton
+    ]
+    sysc = [_cluster((0, 0), (5, 5))]
+    result = score_coreference(gold, sysc)
+    assert result["conll_f1"] == 1.0
+
+
+def test_gold_of_only_singletons_scores_zero_against_a_guessing_system():
+    gold = [_cluster((0, 0)), _cluster((3, 3))]
+    sysc = [_cluster((0, 0), (3, 3))]
+    result = score_coreference(gold, sysc)
+    assert result["conll_f1"] == 0.0
+
+
 def test_all_returned_values_are_plain_python_floats():
     gold = [_cluster((0, 0), (5, 5))]
     sysc = [_cluster((0, 0), (5, 5))]

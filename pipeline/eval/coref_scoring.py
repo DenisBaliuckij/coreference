@@ -29,7 +29,22 @@ def _mention_to_other_cluster(own_clusters: list[tuple], other_clusters: list[tu
 def score_coreference(
     gold_clusters: list[list[MentionSpan]], sys_clusters: list[list[MentionSpan]]
 ) -> dict:
-    key_clusters = _clusters_as_tuples(gold_clusters)
+    """Score system clusters against gold clusters with MUC/B3/CEAFe/CoNLL F1.
+
+    Gold (KEY) clusters with fewer than two mentions are dropped before
+    scoring, per the standard CoNLL-2012 evaluation convention: a "cluster" of
+    size 1 is an annotated mention with no coreference partner, and MUC/B3/CEAFe
+    are undefined or misleading over singletons. The CorefUD loader keeps every
+    annotated mention, so gold data routinely contains singleton clusters,
+    while the resolver adapters structurally cannot emit them -- leaving them in
+    the key deflates every metric (a resolver that perfectly recovers the one
+    real coreference link in a document with three extra singleton mentions
+    scored 0.657 instead of 1.0).
+
+    System (RESPONSE) clusters are deliberately NOT filtered: a system that
+    reports a singleton is a legitimate signal the existing machinery handles.
+    """
+    key_clusters = [c for c in _clusters_as_tuples(gold_clusters) if len(c) >= 2]
     sys_clusters_t = _clusters_as_tuples(sys_clusters)
 
     key_mention_sys_cluster = _mention_to_other_cluster(key_clusters, sys_clusters_t)

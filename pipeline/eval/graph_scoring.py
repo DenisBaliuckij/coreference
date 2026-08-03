@@ -2,29 +2,62 @@ from __future__ import annotations
 
 import smatch
 
-from ..sys_path_setup import add_text_corpuses_processing_to_path
 from ..graph.penman_convert import graph_to_amr_line
 
 
-def _canonicalize(graph_dict: dict, backend: str):
-    add_text_corpuses_processing_to_path()
-    from graphMetrics import _to_networkx  # reused private helper, see design spec
-
-    G = _to_networkx(graph_dict, backend)
+def _edge_endpoints(edge: dict, backend: str) -> tuple[str, str, str]:
+    """(source, target, relation) in the backend-native dict's own direction."""
     if backend == "RuleBased":
-        label_of = {n: str(n) for n in G.nodes()}
+        return str(edge["agent_1"]), str(edge["agent_2"]), str(edge.get("meaning", ""))
+    return str(edge["source"]), str(edge["target"]), str(edge.get("label", ""))
+
+
+def _raw_node_labels(graph_dict: dict, backend: str) -> list[str]:
+    """Node labels straight out of the backend-native dict, duplicates intact.
+
+    Deliberately does NOT route through graphMetrics._to_networkx: networkx
+    silently collapses same-key nodes on add_node, which erased every duplicate
+    before it could be counted.
+    """
+    if backend == "RuleBased":
+        return [str(node) for node in graph_dict.get("nodes", [])]
+    return [str(node["label"]) for node in graph_dict.get("nodes", [])]
+
+
+def _canonicalize(graph_dict: dict, backend: str):
+    """Reduce a backend-native graph dict to (label_of, node_labels, edge_triples).
+
+    Reads the dict directly instead of going through graphMetrics._to_networkx:
+    that helper builds an *undirected* nx.Graph, which -- together with the
+    alphabetical endpoint sort this function used to apply -- made
+    "john --hit--> mary" and "mary --hit--> john" indistinguishable. Edge
+    triples now preserve the backend's own source -> target direction.
+    """
+    if backend == "RuleBased":
+        label_of = {str(node): str(node) for node in graph_dict.get("nodes", [])}
     else:
-        label_of = {n: G.nodes[n].get("label", str(n)) for n in G.nodes()}
+        label_of = {str(node["id"]): str(node["label"]) for node in graph_dict.get("nodes", [])}
+
+    edge_triples = set()
+    for edge in graph_dict.get("edges", []):
+        src, tgt, rel = _edge_endpoints(edge, backend)
+        # Endpoints not declared in "nodes" still count, mirroring what
+        # nx.add_edge used to do implicitly; their id doubles as their label.
+        label_of.setdefault(src, src)
+        label_of.setdefault(tgt, tgt)
+        edge_triples.add((label_of[src], label_of[tgt], rel))
 
     node_labels = set(label_of.values())
-    edge_triples = set()
-    for u, v, data in G.edges(data=True):
-        a, b = sorted((label_of[u], label_of[v]))
-        edge_triples.add((a, b, data.get("label", "")))
     return label_of, node_labels, edge_triples
 
 
 def _prf(gold: set, pred: set) -> dict:
+    if not gold and not pred:
+        # Both sides vacuous (e.g. a short document where the extractor found
+        # nothing): that is agreement, not total failure. smatch already scores
+        # empty-vs-empty as 1.0; all three metrics must say the same thing
+        # before they get averaged into one pairing summary.
+        return {"precision": 1.0, "recall": 1.0, "f1": 1.0}
     tp = len(gold & pred)
     precision = tp / len(pred) if pred else 0.0
     recall = tp / len(gold) if gold else 0.0
@@ -37,16 +70,16 @@ def compute_node_duplication_rate(graph_dict: dict, backend: str) -> float:
     in the same graph -- self-contained, not a comparison against another
     graph. Comparing oracle's rate to predicted's rate is what isolates the
     coreference-error contribution (oracle should be near zero by
-    construction)."""
-    add_text_corpuses_processing_to_path()
-    from graphMetrics import _to_networkx
+    construction).
 
-    G = _to_networkx(graph_dict, backend)
-    if backend == "RuleBased":
-        raw_labels = [str(n) for n in G.nodes()]
-    else:
-        raw_labels = [G.nodes[n].get("label", str(n)) for n in G.nodes()]
-
+    Note on the RuleBased backend: graphBuilder.merge_graph stores nodes as
+    ``list(set(...))``, so a RuleBased graph dict produced by the real backend
+    can never carry duplicate labels and its rate is structurally 0.0. The
+    metric is meaningful for id/label backends (LLMv2), where two distinct node
+    ids may share a label. This function still counts duplicates faithfully for
+    either shape if the dict does contain them.
+    """
+    raw_labels = _raw_node_labels(graph_dict, backend)
     if not raw_labels:
         return 0.0
     unique = len(set(raw_labels))
