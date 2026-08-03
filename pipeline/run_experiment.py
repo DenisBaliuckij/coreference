@@ -51,10 +51,17 @@ def _average_graph(doc_entries: list[dict]) -> dict:
     node_f1s = [e["graph_metrics"]["node_precision_recall_f1"]["f1"] for e in doc_entries]
     edge_f1s = [e["graph_metrics"]["edge_precision_recall_f1"]["f1"] for e in doc_entries]
     smatch_f1s = [e["graph_metrics"]["smatch"]["f1"] for e in doc_entries]
+    oracle_dups = [e["graph_metrics"]["oracle_node_duplication_rate"] for e in doc_entries]
+    predicted_dups = [e["graph_metrics"]["predicted_node_duplication_rate"] for e in doc_entries]
     return {
         "node_precision_recall_f1": {"f1": sum(node_f1s) / n},
         "edge_precision_recall_f1": {"f1": sum(edge_f1s) / n},
         "smatch": {"f1": sum(smatch_f1s) / n},
+        # Central to the design spec's oracle-ablation "error budget" framing:
+        # aggregated here (and rendered by report.py) so it is visible without
+        # digging through the per-document entries in results.json.
+        "oracle_node_duplication_rate": sum(oracle_dups) / n,
+        "predicted_node_duplication_rate": sum(predicted_dups) / n,
     }
 
 
@@ -69,23 +76,62 @@ def run_experiment(
 ) -> Path:
     documents = load_corefud_corpus(corpus_path)
 
-    per_pairing = []
+    resolvers, skipped_resolvers = [], []
     for resolver_name in resolver_names:
         resolver = _build_resolver(resolver_name, language, llm_client=llm_client)
-        if not supports_language(resolver, language):
-            continue
+        if supports_language(resolver, language):
+            resolvers.append((resolver_name, resolver))
+        else:
+            skipped_resolvers.append(resolver_name)
 
-        for backend_name in graph_backend_names:
-            graph_backend = _build_graph_backend(backend_name, language, llm_client=llm_client, embedder=embedder)
-            if not supports_language(graph_backend, language):
-                continue
+    backends, skipped_backends = [], []
+    for backend_name in graph_backend_names:
+        graph_backend = _build_graph_backend(
+            backend_name, language, llm_client=llm_client, embedder=embedder
+        )
+        if supports_language(graph_backend, language):
+            backends.append((backend_name, graph_backend))
+        else:
+            skipped_backends.append(backend_name)
 
+    if not resolvers or not backends:
+        # A silently empty results.json plus an exit code of 0 is the worst
+        # possible outcome for a research tool: fail loudly instead.
+        raise RuntimeError(
+            f"no resolver x graph-backend pairing supports language {language!r}: "
+            f"resolvers filtered out: {skipped_resolvers or 'none'}; "
+            f"graph backends filtered out: {skipped_backends or 'none'}. "
+            f"Requested resolvers={resolver_names}, graph_backends={graph_backend_names}."
+        )
+
+    # build_oracle_text and resolver.resolve depend only on the document (and,
+    # for the latter, the resolver) -- never on the graph backend. Computing
+    # them inside the backend loop wasted R x B work and, worse, let a
+    # non-deterministic resolver (LLMv2) hand a *different* resolved text to
+    # each backend, breaking the apples-to-apples comparison the report implies.
+    oracle_texts = [build_oracle_text(doc) for doc in documents]
+
+    # Keyed by (backend_name, document position): the oracle graph depends on
+    # the backend and the document only, so it is built once per pair and
+    # reused across every resolver.
+    oracle_graph_cache: dict[tuple[str, int], dict] = {}
+
+    per_pairing = []
+    for resolver_name, resolver in resolvers:
+        # Exactly one resolve() call per (resolver, document).
+        resolver_outputs = [resolver.resolve(doc) for doc in documents]
+
+        for backend_name, graph_backend in backends:
             doc_entries = []
-            for doc in documents:
-                oracle_text = build_oracle_text(doc)
-                resolver_output = resolver.resolve(doc)
+            for doc_index, doc in enumerate(documents):
+                resolver_output = resolver_outputs[doc_index]
 
-                oracle_graph = graph_backend.build(oracle_text)
+                cache_key = (backend_name, doc_index)
+                if cache_key not in oracle_graph_cache:
+                    oracle_graph_cache[cache_key] = graph_backend.build(oracle_texts[doc_index])
+                oracle_graph = oracle_graph_cache[cache_key]
+
+                # Genuinely depends on both resolver and backend: computed R x B.
                 predicted_graph = graph_backend.build(resolver_output.resolved_text)
 
                 coref_metrics = None
