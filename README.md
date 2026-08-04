@@ -1,29 +1,356 @@
-# Cascade experimental stand
+# Экспериментальный стенд каскадной архитектуры
 
-Standalone pipeline: gold CoNLL-U corpus in, cascade-architecture coreference +
-graph-construction results out. See
-`docs/superpowers/specs/2026-08-02-cascade-experimental-stand-design.md` for
-the design.
+Автономный (standalone) Python-пайплайн: на входе — золотой корпус с разметкой
+кореференции в формате CoNLL-U/CorefUD, на выходе — количественное сравнение
+качества разрешения кореференции и качества построенного из текста
+семантического графа для одной или нескольких пар «резолвер × бэкенд графа».
 
-## Setup
+Стенд реализует **каскадную архитектуру** (сначала разрешение кореференции,
+затем построение графа) и **oracle-абляцию**: для каждого документа строится
+не только граф по тексту, обработанному реальным резолвером, но и граф по
+тексту, где все кореферентные упоминания заменены на форму первого упоминания
+кластера по золотой разметке — это верхняя граница качества, с которой
+сравнивается предсказанный результат.
 
-    pip install -r requirements.txt
+Подробности архитектуры, обоснование решений и границы охвата — в
+[`docs/superpowers/specs/2026-08-02-cascade-experimental-stand-design.md`](docs/superpowers/specs/2026-08-02-cascade-experimental-stand-design.md)
+и в схеме [`experimental-stand-scheme.pdf`](experimental-stand-scheme.pdf).
+Подробное руководство пользователя — в [`manual-ru.pdf`](manual-ru.pdf).
+План реализации по задачам — в
+[`docs/superpowers/plans/2026-08-02-cascade-experimental-stand.md`](docs/superpowers/plans/2026-08-02-cascade-experimental-stand.md).
 
-This pipeline reuses coreference/graph code from the sibling repo
-`text-corpuses-processing` (assumed to be checked out at
-`../text-corpuses-processing` relative to this repo; override with the
-`TEXT_CORPUSES_PROCESSING_DAGS` env var). Follow that repo's own CLAUDE.md
-prerequisites (spaCy models, nltk data) to run the LapinLiass/SpacyNeural/
-LLMv2 resolvers and graph backends for real; unit tests here mock those
-dependencies and don't require them installed.
+---
 
-## Run
+## Содержание
 
-    python -m pipeline.run_experiment \
-      --corpus data/corpora/sample_en_mini.conllu --language en \
-      --resolvers LapinLiass --graph-backends RuleBased \
-      --output reports/run1
+- [Требования и установка](#требования-и-установка)
+- [Структура репозитория](#структура-репозитория)
+- [Быстрый старт](#быстрый-старт)
+- [Параметры командной строки](#параметры-командной-строки)
+- [Формат входного корпуса](#формат-входного-корпуса)
+- [Резолверы кореференции](#резолверы-кореференции)
+- [Бэкенды построения графа](#бэкенды-построения-графа)
+- [Формат результатов](#формат-результатов)
+- [Метрики](#метрики)
+- [Тестирование](#тестирование)
+- [Известные ограничения](#известные-ограничения)
+- [Как добавить новый резолвер или бэкенд](#как-добавить-новый-резолвер-или-бэкенд)
 
-## Test
+---
 
-    pytest
+## Требования и установка
+
+```bash
+pip install -r requirements.txt
+```
+
+`requirements.txt` устанавливает то, что нужно самому стенду:
+`networkx`, `numpy`, `scipy`, `smatch` (структурная оценка графа) и `coval`
+(эталонный академический скорер кореференции, устанавливается из
+`git+https://github.com/ns-moosavi/coval.git` — **не** из одноимённого,
+но не имеющего отношения к делу пакета на PyPI).
+
+Стенд переиспользует код резолверов кореференции и бэкендов построения графа
+из соседнего репозитория **`text-corpuses-processing`** — он должен быть
+доступен рядом (по умолчанию ожидается путь `../text-corpuses-processing`
+относительно корня этого репозитория; переопределяется переменной окружения
+`TEXT_CORPUSES_PROCESSING_DAGS`, указывающей прямо на каталог `dags/`).
+
+Юнит-тесты стенда **не требуют** установленного `text-corpuses-processing` —
+все обращения к его коду замоканы через `sys.modules`. Реальный прогон
+(`python -m pipeline.run_experiment ...`) с резолверами `LapinLiass` /
+`SpacyNeural` / `LLMv2` или бэкендом `RuleBased` требует, чтобы в
+`text-corpuses-processing` были установлены его собственные зависимости
+(модели spaCy, данные NLTK — см. `CLAUDE.md` того репозитория). Резолвер и
+бэкенд `LLMv2` дополнительно требуют `torch`, `transformers`,
+`sentence-transformers` (устанавливаются вместе с `text-corpuses-processing`,
+см. `dags/llm_v2/requirements.txt` там же) и реально скачивают/запускают
+локальную LLM — первый прогон с `LLMv2` может занять существенное время.
+
+---
+
+## Структура репозитория
+
+```
+coreference/
+  pipeline/
+    types.py                    # общие структуры данных (Token, MentionSpan, CorefDocument, ResolverOutput)
+    sys_path_setup.py           # подключение text-corpuses-processing через sys.path
+    corpus/
+      corefud_loader.py         # разбор CoNLL-U с нотацией Entity=
+      oracle.py                 # построение oracle-текста по золотым кластерам
+    resolvers/
+      base.py                   # интерфейс ResolverAdapter, проекция спанов, UnionFind
+      lapin_liass_adapter.py    # адаптер правило-ориентированного резолвера (EN)
+      spacy_neural_adapter.py   # адаптер нейросетевого резолвера spaCy (EN)
+      llm_v2_adapter.py         # адаптер LLM-резолвера (любой язык с промпт-файлом)
+    graph/
+      base.py                   # интерфейс GraphBackendAdapter
+      rule_based_graph_adapter.py  # правило-ориентированный бэкенд (EN)
+      llm_v2_graph_adapter.py      # LLM-бэкенд (любой язык с промпт-файлом)
+      penman_convert.py         # конвертация графа в AMR-строку для smatch
+    eval/
+      coref_scoring.py          # CoNLL F1 (MUC/B³/CEAFe) через coval
+      graph_scoring.py          # P/R по узлам/рёбрам, доля дублей, Smatch-балл
+    report.py                   # сборка results.json и report.html
+    run_experiment.py           # оркестрация прогона + точка входа CLI
+  data/corpora/
+    sample_en_mini.conllu       # маленький пример корпуса для проверки
+  tests/pipeline/               # тесты (79 тестов на момент последнего ревью)
+  docs/superpowers/
+    specs/                      # дизайн-документ
+    plans/                      # план реализации по задачам
+  experimental-stand-scheme.pdf # архитектурная схема (на русском)
+  manual-ru.pdf                 # подробное руководство пользователя (на русском)
+  README.md                     # этот файл
+```
+
+---
+
+## Быстрый старт
+
+Пример на входящем в репозиторий тестовом корпусе (английский, резолвер без
+внешних моделей — `LapinLiass` требует `en_core_web_sm`, `RuleBased`
+требует `en_core_web_lg` и WordNet, см. раздел «Требования»):
+
+```bash
+python -m pipeline.run_experiment \
+  --corpus data/corpora/sample_en_mini.conllu \
+  --language en \
+  --resolvers LapinLiass \
+  --graph-backends RuleBased \
+  --output reports/run1
+```
+
+После завершения:
+
+```
+reports/run1/results.json   — «сырые» метрики по каждой паре резолвер×бэкенд и по каждому документу
+reports/run1/report.html    — сводная HTML-таблица для быстрого просмотра
+```
+
+Несколько резолверов и бэкендов сразу (стенд прогонит все допустимые для
+языка комбинации):
+
+```bash
+python -m pipeline.run_experiment \
+  --corpus data/corpora/sample_en_mini.conllu \
+  --language en \
+  --resolvers LapinLiass,SpacyNeural \
+  --graph-backends RuleBased \
+  --output reports/run2
+```
+
+---
+
+## Параметры командной строки
+
+| Параметр | Обязателен | Описание |
+|---|---|---|
+| `--corpus PATH` | да | Путь к файлу `.conllu` или каталогу с файлами `.conllu` |
+| `--language CODE` | да | Код языка корпуса (например, `en`, `ru`) — используется для фильтрации резолверов/бэкендов по `language_support` и передаётся в LLM-компоненты |
+| `--resolvers NAMES` | да | Резолверы через запятую: `LapinLiass`, `SpacyNeural`, `LLMv2` |
+| `--graph-backends NAMES` | да | Бэкенды через запятую: `RuleBased`, `LLMv2` |
+| `--output PATH` | да | Каталог для `results.json` и `report.html` (создаётся при необходимости) |
+| `--llm-model NAME` | нет | Имя модели HuggingFace для `LLMv2`; по умолчанию `Qwen/Qwen2-1.5B-Instruct`. Игнорируется, если `LLMv2` не используется ни как резолвер, ни как бэкенд |
+
+Если после фильтрации по языку не осталось ни одной допустимой пары
+«резолвер × бэкенд», стенд **завершается ошибкой** (`RuntimeError` с
+указанием языка и того, что было отфильтровано), а не тихо пишет пустой
+отчёт — например, `--language ru --resolvers LapinLiass` завершится ошибкой,
+так как `LapinLiass` поддерживает только английский.
+
+---
+
+## Формат входного корпуса
+
+CoNLL-U с кореференцией в нотации **CorefUD** (атрибут `Entity=` в колонке
+MISC). Поддерживаются:
+
+- открывающие/закрывающие скобки кластеров, включая составную запись на
+  одном токене (`(e1-person-1-new)`) и раздельную (`(e1-...` / `e1)`);
+- несколько фрагментов сущностей, слитых в одном значении `Entity=` без
+  разделителя (например, `(e1-person-1-new)(e2-org-2-new)`) — по реальной
+  нотации CorefUD, а не только через `|`;
+- пустые узлы (`N.1`, `N.2`, ...) для нулевой анафоры;
+- несколько документов в одном файле через `# newdoc` (с `id=` или без).
+
+Пример минимального документа — `data/corpora/sample_en_mini.conllu`.
+
+**Не поддерживается** (см. также раздел «Известные ограничения»):
+многословные токены (multiword tokens, строки вида `3-4`) — их поверхностная
+форма отбрасывается при восстановлении текста; разрывные (discontinuous)
+упоминания с маркерами вида `e1[1/2]` — интерпретируются как часть
+идентификатора сущности, а не как метаданные разрыва.
+
+---
+
+## Резолверы кореференции
+
+| Имя | Поддержка языков | Источник | Даёт кластеры для CoNLL F1? |
+|---|---|---|---|
+| `LapinLiass` | только `en` | правило-ориентированный резолвер `text-corpuses-processing` (spaCy `en_core_web_sm` + эвристика salience) | да |
+| `SpacyNeural` | только `en` | нейросетевой резолвер spaCy (`en_coreference_web_trf`) | да |
+| `LLMv2` | любой язык с файлом `prompts/coreference_<lang>.txt` в `text-corpuses-processing/dags/llm_v2/` (сейчас `en`, `ru`) | локальная LLM, переписывающая текст | **нет** — только текст, без спанов упоминаний |
+
+Резолвер `LLMv2` намеренно не даёт кореференционных метрик: он переписывает
+текст, но не сообщает, какой фрагмент заменил какое упоминание. Для него
+считается только графовая (oracle-абляционная) метрика; в `results.json` и
+`report.html` его `coreference_metrics` будет `null` / «N/A» — это
+архитектурное ограничение, а не ошибка.
+
+## Бэкенды построения графа
+
+| Имя | Поддержка языков | Источник |
+|---|---|---|
+| `RuleBased` | только `en` | синтаксический разбор spaCy (`en_core_web_lg`) + лемматизация WordNet |
+| `LLMv2` | любой язык с файлами `prompts/extraction_<lang>.txt` (сейчас `en`, `ru`) | локальная LLM: извлечение троек → нормализация → дедупликация → сборка графа |
+
+---
+
+## Формат результатов
+
+**`results.json`** — по одному объекту на каждую пару «резолвер × бэкенд»:
+
+```json
+{
+  "run_id": "run1",
+  "language": "en",
+  "generated_at": "2026-08-04T12:00:00+00:00",
+  "results": [
+    {
+      "resolver": "LapinLiass",
+      "graph_backend": "RuleBased",
+      "documents": [ /* метрики по каждому документу */ ],
+      "coreference_metrics": { "conll_f1": 0.83 },
+      "graph_metrics": {
+        "node_precision_recall_f1": { "f1": 0.9 },
+        "edge_precision_recall_f1": { "f1": 0.75 },
+        "smatch": { "f1": 0.81 }
+      }
+    }
+  ]
+}
+```
+
+Полные метрики по каждому документу (MUC/B³/CEAFe отдельно, доля дублей
+узлов и т.д.) сохраняются во вложенном списке `documents` — сводка на
+верхнем уровне пары это усреднение по документам.
+
+**`report.html`** — таблица «резолвер, бэкенд, CoNLL F1, Node F1, Edge F1,
+Smatch F1, доля дублей (oracle/predicted)» для быстрого визуального
+сравнения; значения `N/A` — там, где метрика не определена для этой пары.
+
+---
+
+## Метрики
+
+**Кореференция** (при наличии кластеров у резолвера):
+
+- **MUC**, **B³**, **CEAFe** — три эталонные метрики CoNLL-2012 через `coval`;
+- **CoNLL F1** — их среднее.
+- Золотые синглтон-кластеры отбрасываются перед подсчётом (стандарт
+  CoNLL-2012) — иначе резолвер, структурно не выдающий синглтоны, получал бы
+  заниженную оценку.
+
+**Граф** (oracle-граф как эталон, predicted-граф как система):
+
+- **Node / Edge Precision, Recall, F1** — по множеству меток узлов и по
+  направленным тройкам (источник, метка, приёмник); направление ребра
+  учитывается — разворот ребра засчитывается как несовпадение;
+- **Доля дублей узлов** — доля узлов графа, чья метка совпадает с меткой
+  другого узла того же графа; считается отдельно для oracle- и
+  predicted-графа, разница — вклад ошибок кореференции;
+- **Smatch-балл** — структурное сопоставление узлов/рёбер (алгоритм из
+  области AMR), через собственный конвертер `penman_convert.py` и
+  библиотеку `smatch`.
+
+Разрыв между значением метрики на oracle-графе и на predicted-графе — это
+оценка «бюджета ошибок», вносимого несовершенством этапа разрешения
+кореференции (гипотеза H1 диссертационного плана).
+
+---
+
+## Тестирование
+
+```bash
+pytest        # все тесты, без внешних моделей — только замоканные зависимости
+pytest -v     # подробный вывод
+```
+
+На момент последнего сквозного ревью: **79 тестов, 0 падений**. Тесты не
+требуют установленного `text-corpuses-processing`, spaCy-моделей или
+скачанных LLM — все обращения к тяжёлым зависимостям в тестах заменены на
+поддельные модули через `sys.modules`.
+
+---
+
+## Известные ограничения
+
+Зафиксированы по итогам финального сквозного ревью реализации; не
+блокируют использование стенда, но должны учитываться при интерпретации
+результатов:
+
+- **Разрывные (discontinuous) упоминания CorefUD** (маркеры вида
+  `e1[1/2]`) не поддерживаются загрузчиком — символы `[`, `]` считаются
+  частью идентификатора сущности, что может привести либо к разбиению
+  одного кластера на несвязанные псевдо-сущности, либо к ошибке разбора.
+  Встречаются редко; при работе с корпусом, где они есть, стоит проверить
+  файл заранее.
+- **Доля дублей узлов для бэкенда `RuleBased`** структурно всегда равна
+  `0.0`: используемый в `text-corpuses-processing` `graphBuilder.merge_graph`
+  хранит узлы как `set`, то есть дубли меток невозможны уже на уровне
+  построения графа этим бэкендом. Значение `0.0` для `RuleBased` — это
+  честное свойство бэкенда, а не признак ошибки в подсчёте метрики.
+  Метрика содержательна для бэкенда `LLMv2`, где узлы идентифицируются по
+  `id`, а не по метке напрямую.
+- **Пустой корпус** (файл без строк-токенов) приводит к делению на ноль
+  при усреднении графовых метрик по документам — на реальных корпусах с
+  текстом это не встречается, но стоит знать при подготовке синтетических
+  тестовых файлов.
+- Совместная (joint) архитектура, мультиязычное пакетное сравнение,
+  статистическая значимость, кривые обучения, анализ ошибок по типам
+  анафоры и нисходящая QA-задача — вне рамок этой версии стенда (см.
+  design-документ, раздел «Out of scope»).
+
+---
+
+## Как добавить новый резолвер или бэкенд
+
+**Резолвер** — реализовать класс с интерфейсом
+`pipeline.resolvers.base.ResolverAdapter`:
+
+```python
+class MyResolverAdapter:
+    name = "MyResolver"
+    language_support = {"en", "ru"}  # или "any"
+
+    def resolve(self, doc: CorefDocument) -> ResolverOutput:
+        ...
+        return ResolverOutput(resolved_text=..., clusters=... | None)
+```
+
+Кластеры (`MentionSpan`) должны быть в координатах **золотой токенизации**
+(`doc.tokens`), а не токенизации, используемой внутри самого резолвера —
+для проекции спанов используйте
+`pipeline.resolvers.base.project_char_span_to_gold_tokens`. Обращения к
+стороннему коду делайте лениво (внутри `resolve()`, не на уровне модуля),
+чтобы юнит-тесты могли подменять зависимости через `sys.modules`.
+
+**Бэкенд графа** — интерфейс `pipeline.graph.base.GraphBackendAdapter`:
+
+```python
+class MyGraphAdapter:
+    name = "MyBackend"
+    backend_name = "MyBackend"  # должно совпадать со значением, которое
+                                 # понимает pipeline.eval.graph_scoring
+    language_support = "any"
+
+    def build(self, text: str) -> dict:
+        ...
+        return {"nodes": [...], "edges": [...]}
+```
+
+В обоих случаях после добавления класса нужно зарегистрировать его имя в
+`_build_resolver` / `_build_graph_backend` в `pipeline/run_experiment.py`,
+чтобы имя стало доступно через флаги `--resolvers` / `--graph-backends`.
