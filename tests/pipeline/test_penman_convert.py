@@ -49,3 +49,28 @@ def test_relation_ending_in_of_is_escaped():
     parsed.rename_node("x")
     _instance, _attr, relation = parsed.get_triples()
     assert any(rel == "made-of_" for (rel, _, _) in relation)
+
+
+def test_concept_label_containing_slash_is_stripped_not_left_to_break_parser():
+    # A literal "/" in a node label (e.g. "race/ethnicity", common in real
+    # corpora) collides with PENMAN's own var/concept separator and made
+    # smatch.get_amr_match() return None on real documents before this was
+    # sanitized alongside "(", ")", and '"'.
+    nodes = {"n0": "race/ethnicity", "n1": "discrimination"}
+    edges = [("n0", "n1", "linked to")]
+    line = graph_to_amr_line(nodes, edges, "a")
+    parsed = amr.AMR.parse_AMR_line(line)
+    assert parsed is not None
+    parsed.rename_node("x")
+    instance, _attr, _relation = parsed.get_triples()
+    concepts = {v for (_, _, v) in instance}
+    assert "race_ethnicity" in concepts
+    assert "raceethnicity" not in concepts
+
+
+def test_relation_label_containing_colon_is_stripped_not_left_to_break_parser():
+    nodes = {"n0": "a", "n1": "b"}
+    edges = [("n0", "n1", "ratio: 2:1")]
+    line = graph_to_amr_line(nodes, edges, "a")
+    parsed = amr.AMR.parse_AMR_line(line)
+    assert parsed is not None
