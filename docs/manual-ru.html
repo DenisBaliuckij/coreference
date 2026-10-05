@@ -111,7 +111,7 @@ docker build -t coref-experiment:latest --build-arg BUILD_INFO="coreference &lt;
 <code>./corpora</code> → <code>/corpora</code> (только чтение) и <code>./reports</code> → <code>/reports</code>.</p>
 <h3>Локальная установка</h3>
 <ol class="steps">
-  <li><code>pip install -r requirements.txt</code> — networkx, numpy, scipy, smatch, udapi, pytest.</li>
+  <li><code>pip install -r requirements.txt</code> — networkx, numpy, scipy, smatch (необязательно), udapi, pytest.</li>
   <li>Склонируйте официальный скорер <code>https://github.com/ufal/corefud-scorer</code>, установите его зависимости и укажите путь к
     <code>corefud-scorer.py</code> в переменной <code>COREFUD_SCORER</code>. Без скорера прогоны резолверов, выдающих кластеры, завершаются
     ошибкой, а соответствующие тесты пропускаются.</li>
@@ -139,11 +139,11 @@ docker build -t coref-experiment:latest --build-arg BUILD_INFO="coreference &lt;
       no_resolution_adapter.py   # контроль: текст без изменений                     [новое]
       gold_adapter.py            # контроль: золотой текст и золотые кластеры         [новое]
     graph/
-      rule_based_graph_adapter.py, llm_v2_graph_adapter.py, penman_convert.py, base.py
+      rule_based_graph_adapter.py, llm_v2_graph_adapter.py, base.py
     llm/openai_client.py         # LLM через OpenAI-совместимый сервер                [новое]
     eval/
       corefud_scoring.py         # key/response + официальный скорер CorefUD          [новое]
-      graph_scoring.py           # P/R по узлам и рёбрам, дубли, Smatch
+      graph_scoring.py           # P/R по узлам и рёбрам, дубли, тройной F1
     analysis/summarize.py        # таблицы с бутстрэп-интервалами, диагностика        [новое]
     report.py, run_experiment.py
   data/corpora/sample_en_mini.conllu
@@ -267,7 +267,7 @@ docker build -t coref-experiment:latest --build-arg BUILD_INFO="coreference &lt;
 <table>
 <tr><th>Файл</th><th>Содержимое</th></tr>
 <tr><td><code>results.json</code></td><td>Для каждой пары «резолвер × бэкенд»: кореференционные метрики на уровне корпуса (<code>coreference_metrics</code>, у документов — <code>null</code>), графовые метрики по каждому документу и их среднее</td></tr>
-<tr><td><code>report.html</code></td><td>Сводная таблица: резолвер, бэкенд, CoNLL F1, Node/Edge/Smatch F1, доли дублей</td></tr>
+<tr><td><code>report.html</code></td><td>Сводная таблица: резолвер, бэкенд, CoNLL F1, Node/Edge/Triple F1, доли дублей</td></tr>
 <tr><td><code>coref/key.conllu</code>, <code>coref/&lt;резолвер&gt;.response.conllu</code> <span class="new">новое</span></td><td>Файлы, по которым считалась кореференция; их можно переоценить скорером с другими параметрами без повторного прогона</td></tr>
 <tr><td><code>run_config.json</code> <span class="new">новое</span></td><td>Аргументы запуска, модель эмбеддингов, параметры LLM и расход токенов</td></tr>
 <tr><td><code>artifacts/texts/&lt;резолвер|ORACLE&gt;/&lt;doc&gt;.txt</code> <span class="new">новое</span></td><td>Тексты после разрешения (при <code>--save-artifacts</code>)</td></tr>
@@ -301,7 +301,7 @@ docker build -t coref-experiment:latest --build-arg BUILD_INFO="coreference &lt;
 <tr><td>Node P/R/F1</td><td>Совпадение множеств меток узлов predicted- и oracle-графа</td></tr>
 <tr><td>Edge P/R/F1</td><td>Совпадение направленных троек (источник, отношение, приёмник)</td></tr>
 <tr><td>Доля дублей узлов</td><td>Доля узлов одного графа с совпадающей меткой (внутренняя метрика)</td></tr>
-<tr><td>Smatch</td><td>Наилучшее сопоставление вершин, максимизирующее число совпавших троек (алгоритм AMR)</td></tr>
+<tr><td>Triple F1</td><td>F1 по тройкам «узел + ребро» при выравнивании узлов по совпадению меток (Smatch с фиксированным выравниванием). Поиск выравнивания Smatch на графах документа не масштабируется (3&nbsp;ГБ на 200 узлах, нехватка памяти на 450) и в графах, где узел определяется меткой, может лишь сопоставить разные сущности</td></tr>
 </table>
 
 <h2>12. Статистический анализ результатов <span class="new">новое</span></h2>
@@ -311,7 +311,7 @@ docker build -t coref-experiment:latest --build-arg BUILD_INFO="coreference &lt;
   <li><b>Кореференция:</b> переоценка ответа во всех трёх режимах сопоставления; 95%-й доверительный интервал CoNLL F1 бутстрэпом по
     документам (документы выбираются с возвращением, каждая выборка оценивается как корпус; повторяющиеся документы
     переименовываются, чтобы скорер считал их разными).</li>
-  <li><b>Граф:</b> среднее Node/Edge/Smatch F1 с 95%-ми бутстрэп-интервалами; парная бутстрэп-разность с <code>NoResolution</code>
+  <li><b>Граф:</b> среднее Node/Edge/Triple F1 с 95%-ми бутстрэп-интервалами; парная бутстрэп-разность с <code>NoResolution</code>
     (интервал и односторонний p = доля выборок с разностью ≤ 0); <b>gap closed</b> = (R − NoResolution) / (Gold − NoResolution) — доля
     «бюджета ошибок», которую резолвер отыгрывает относительно контрольного потолка.</li>
   <li><b>Тексты</b> (из артефактов): местоимения на 1000 слов, отношение длины к исходному тексту, посимвольное сходство с oracle- и

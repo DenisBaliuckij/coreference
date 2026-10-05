@@ -31,6 +31,7 @@ from pathlib import Path
 
 from ..corpus.corefud_loader import parse_conllu
 from ..eval.corefud_scoring import MATCH_MODES, score_corpus, scorer_available
+from ..eval.graph_scoring import compute_graph_scores
 
 PRONOUNS = {
     "en": set("he him his himself she her hers herself it its itself they them their theirs themselves "
@@ -89,6 +90,14 @@ def _renamed(block: str, doc_id: str, new_id: str) -> str:
     return "\n".join(out)
 
 
+def _join_blocks(header: list[str], blocks: list[str]) -> str:
+    """Document blocks back into one CoNLL-U file: every block ends with its blank line, else
+    the last sentence of one document runs into the first of the next (udapi: 'cycle')."""
+    head = "\n".join(header).strip("\n")
+    body = "\n\n".join(b.strip("\n") for b in blocks)
+    return (head + "\n" if head else "") + body + "\n\n"
+
+
 def coref_bootstrap(key_path: Path, response_path: Path, match: str, n: int, seed: int = 0) -> tuple[float, float]:
     """95% CI of corpus-level CoNLL F1 over documents resampled with replacement; duplicates
     are renamed so the scorer treats them as separate documents."""
@@ -106,8 +115,8 @@ def coref_bootstrap(key_path: Path, response_path: Path, match: str, n: int, see
                 new = f"{d}__b{j}"
                 k_parts.append(_renamed(key_docs[d], d, new))
                 r_parts.append(_renamed(resp_docs[d], d, new))
-            k_file.write_text("\n".join(key_header + k_parts) + "\n\n", encoding="utf-8")
-            r_file.write_text("\n".join(resp_header + r_parts) + "\n\n", encoding="utf-8")
+            k_file.write_text(_join_blocks(key_header, k_parts), encoding="utf-8")
+            r_file.write_text(_join_blocks(resp_header, r_parts), encoding="utf-8")
             scores.append(score_corpus(k_file, r_file, match=match)["conll_f1"])
     scores.sort()
     return scores[int(0.025 * n)], scores[min(n - 1, int(0.975 * n))]
@@ -187,7 +196,7 @@ def corpus_stats(key_path: Path, language: str) -> dict:
 
 
 # ------------------------------------------------------------------------------------- main
-METRICS = (("node", "node_precision_recall_f1"), ("edge", "edge_precision_recall_f1"), ("smatch", "smatch"))
+METRICS = (("node", "node_precision_recall_f1"), ("edge", "edge_precision_recall_f1"), ("triple", "triple_f1"))
 
 
 def summarize_run(run: Path, n_boot: int) -> dict:
@@ -198,13 +207,24 @@ def summarize_run(run: Path, n_boot: int) -> dict:
     key_path = run / "coref" / "key.conllu"
     summary["corpus"] = corpus_stats(key_path, language)
 
+    art = run / "artifacts"
     per_doc: dict[tuple[str, str], dict[str, list[float]]] = {}
+    rescored = 0
     for pairing in results["results"]:
         res, be = pairing["resolver"], pairing["graph_backend"]
         values = defaultdict(list)
         for d in pairing["documents"]:
+            metrics = d["graph_metrics"]
+            # graphs saved with --save-artifacts are re-scored with the current graph_scoring, so
+            # a fix to a metric (e.g. Smatch, 2026-10-05) reaches old runs without new LLM calls
+            o_path = art / "graphs" / be / "ORACLE" / f"{d['doc_id']}.json"
+            p_path = art / "graphs" / be / res / f"{d['doc_id']}.json"
+            if o_path.is_file() and p_path.is_file():
+                metrics = compute_graph_scores(json.loads(o_path.read_text(encoding="utf-8")),
+                                               json.loads(p_path.read_text(encoding="utf-8")), be)
+                rescored += 1
             for short, key in METRICS:
-                v = d["graph_metrics"][key]
+                v = metrics[key]
                 values[short].append(v["f1"] if isinstance(v, dict) else v)
         per_doc[(res, be)] = values
         if pairing["coreference_metrics"] and res not in summary["coreference"]:
@@ -243,7 +263,7 @@ def summarize_run(run: Path, n_boot: int) -> dict:
             row["documents"] = len(values["node"])
             summary["graph"][f"{res} x {be}"] = row
 
-    art = run / "artifacts"
+    summary["graph_metrics_rescored_documents"] = rescored
     summary["texts"] = text_diagnostics(art, language)
     summary["graph_sizes"] = graph_sizes(art)
     return summary
@@ -272,11 +292,11 @@ def to_markdown(summaries: list[dict]) -> str:
                     out.append(f"| {res} | {match} | {_f(sc['muc']['f1'])} | {_f(sc['b_cubed']['f1'])} | "
                                f"{_f(sc['ceafe']['f1'])} | {conll} |")
             out.append("")
-        out.append("| Resolver × backend | Node F1 [95% CI] | Edge F1 [95% CI] | Smatch F1 [95% CI] | "
+        out.append("| Resolver × backend | Node F1 [95% CI] | Edge F1 [95% CI] | Triple F1 [95% CI] | "
                    "Δ edge vs NoRes [95% CI], p | Gap closed (edge) |\n|---|---|---|---|---|---|")
         for name, row in s["graph"].items():
             cells = [f"{_f(row[m]['mean'])} [{_f(row[m]['ci95'][0])}, {_f(row[m]['ci95'][1])}]"
-                     for m in ("node", "edge", "smatch")]
+                     for m in ("node", "edge", "triple")]
             d = row["edge"].get("vs_NoResolution")
             delta = f"{d['mean_diff']:+.3f} [{d['ci95'][0]:+.3f}, {d['ci95'][1]:+.3f}], p={d['p_one_sided']:.3f}" if d else "–"
             out.append(f"| {name} | " + " | ".join(cells) + f" | {delta} | {_f(row['edge'].get('gap_closed'), 2)} |")

@@ -1,8 +1,24 @@
 from __future__ import annotations
 
+import random
+
 import smatch
 
-from ..graph.penman_convert import graph_to_amr_line
+# smatch caches the score of every node mapping its hill-climbing search evaluates, keyed by the
+# whole mapping, in a module-level dict that is never trimmed: on graphs of a few hundred nodes it
+# grows to many GB (a 450-node pair was OOM-killed at 12 GB). The cache only saves recomputation,
+# so it is cleared whenever it passes _SMATCH_CACHE_LIMIT entries; scores are unchanged.
+_SMATCH_CACHE_LIMIT = 50_000
+if not getattr(smatch.compute_match, "_bounded", False):
+    _smatch_compute_match = smatch.compute_match
+
+    def _bounded_compute_match(mapping, weight_dict):
+        if len(smatch.match_triple_dict) > _SMATCH_CACHE_LIMIT:
+            smatch.match_triple_dict.clear()
+        return _smatch_compute_match(mapping, weight_dict)
+
+    _bounded_compute_match._bounded = True
+    smatch.compute_match = _bounded_compute_match
 
 
 def _edge_endpoints(edge: dict, backend: str) -> tuple[str, str, str]:
@@ -87,6 +103,9 @@ def compute_node_duplication_rate(graph_dict: dict, backend: str) -> float:
 
 
 def compute_smatch(oracle_graph: dict, predicted_graph: dict, backend: str) -> dict:
+    """Smatch with its own alignment search. NOT part of the default scores (see
+    compute_triple_f1): memory grows about with the fourth power of the node count, so use it
+    only on sentence-sized graphs (a few dozen nodes)."""
     _, oracle_nodes, oracle_edges = _canonicalize(oracle_graph, backend)
     _, pred_nodes, pred_edges = _canonicalize(predicted_graph, backend)
 
@@ -104,13 +123,54 @@ def compute_smatch(oracle_graph: dict, predicted_graph: dict, backend: str) -> d
         if a in pred_label_to_id and b in pred_label_to_id
     ]
 
-    oracle_line = graph_to_amr_line(oracle_nodes_dict, oracle_edge_list, "o")
-    pred_line = graph_to_amr_line(pred_nodes_dict, pred_edge_list, "p")
+    # Smatch's alignment search runs on the graphs' own triples: one instance triple per node
+    # (its label) and one relation triple per edge. The graphs used to be serialised to a single
+    # AMR line hung under a synthetic root with numbered :has-entityN edges; those scaffolding
+    # triples (2 per node) dominated the score and paired unrelated nodes that shared a sorted
+    # position, and the search over them took >14 GB on a 450-node LLMv2 graph (OOM-killed run,
+    # 2026-10-05). Node names must be <prefix><index in the instance list> for smatch's pool.
+    def triples(nodes_dict, edge_list, prefix):
+        index = {nid: f"{prefix}{i}" for i, nid in enumerate(nodes_dict)}
+        instances = [("instance", index[nid], label.strip().lower()) for nid, label in nodes_dict.items()]
+        relations = [(rel.strip().lower(), index[a], index[b]) for a, b, rel in edge_list]
+        return instances, relations
+
+    pred_inst, pred_rel = triples(pred_nodes_dict, pred_edge_list, "a")
+    oracle_inst, oracle_rel = triples(oracle_nodes_dict, oracle_edge_list, "b")
+    test_num, gold_num = len(pred_inst) + len(pred_rel), len(oracle_inst) + len(oracle_rel)
+    if test_num == 0 or gold_num == 0:
+        # two empty graphs agree (1.0, as node/edge P/R say); one empty side matches nothing
+        same = test_num == gold_num
+        return {"precision": float(same), "recall": float(same), "f1": float(same)}
 
     smatch.match_triple_dict.clear()  # module-level cache; must clear per independent comparison
-    match_num, test_num, gold_num = smatch.get_amr_match(pred_line, oracle_line)
+    state = random.getstate()
+    random.seed(0)  # smatch's hill-climbing restarts are random: fixed seed, reproducible scores
+    try:
+        _, match_num = smatch.get_best_match(pred_inst, [], pred_rel, oracle_inst, [], oracle_rel, "a", "b")
+    finally:
+        random.setstate(state)
     precision, recall, f1 = smatch.compute_f(match_num, test_num, gold_num)
     return {"precision": precision, "recall": recall, "f1": f1}
+
+
+def compute_triple_f1(oracle_graph: dict, predicted_graph: dict, backend: str) -> dict:
+    """Smatch-style triple F1 under the label alignment: every node contributes one instance
+    triple (its label) and every edge one relation triple, and a node of one graph is aligned
+    with the node of the other graph that has the same canonical label.
+
+    This is what Smatch computes when its node alignment is fixed to label identity. Smatch's own
+    hill-climbing search over alignments is not used by default: on document-level graphs it does
+    not scale (measured 2026-10-05: 3 GB and 58 s at 200 nodes, OOM at 450), and in graphs whose
+    node identity is their canonical label the only alignments it can add pair nodes with
+    different labels, i.e. different entities. Equal to (|nodes match| + |edges match|) over the
+    triple counts of each side; deterministic and linear in graph size.
+    """
+    _, oracle_nodes, oracle_edges = _canonicalize(oracle_graph, backend)
+    _, pred_nodes, pred_edges = _canonicalize(predicted_graph, backend)
+    gold = {("node", n) for n in oracle_nodes} | {("edge",) + e for e in oracle_edges}
+    pred = {("node", n) for n in pred_nodes} | {("edge",) + e for e in pred_edges}
+    return _prf(gold, pred)
 
 
 def compute_graph_scores(oracle_graph: dict, predicted_graph: dict, backend: str) -> dict:
@@ -122,5 +182,5 @@ def compute_graph_scores(oracle_graph: dict, predicted_graph: dict, backend: str
         "edge_precision_recall_f1": _prf(oracle_edges, pred_edges),
         "oracle_node_duplication_rate": compute_node_duplication_rate(oracle_graph, backend),
         "predicted_node_duplication_rate": compute_node_duplication_rate(predicted_graph, backend),
-        "smatch": compute_smatch(oracle_graph, predicted_graph, backend),
+        "triple_f1": compute_triple_f1(oracle_graph, predicted_graph, backend),
     }

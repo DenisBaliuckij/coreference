@@ -55,3 +55,38 @@ def test_without_save_artifacts_nothing_extra_is_written(monkeypatch, tmp_path):
     run_experiment(corpus_path=_write_two_doc_corpus(tmp_path), language="en",
                    resolver_names=["NoResolution"], graph_backend_names=["RuleBased"], output_dir=out_dir)
     assert not (out_dir / "artifacts").exists()
+
+
+def test_resume_reuses_saved_graphs_and_texts_and_builds_only_what_is_missing(monkeypatch, tmp_path):
+    from tests.pipeline.test_run_experiment_smoke import _CountingBackend, _CountingResolver, _patch_factories
+
+    _install_fake_graph_metrics_module(monkeypatch)
+    corpus = _write_two_doc_corpus(tmp_path)
+    out_dir = tmp_path / "run"
+
+    first_backend = _CountingBackend("B")
+    text_only = _CountingResolver("T")
+    text_only.returns_clusters = False
+    _patch_factories(monkeypatch, {"T": text_only}, {"B": first_backend})
+    first = run_experiment(corpus_path=corpus, language="en", resolver_names=["T"], graph_backend_names=["B"],
+                           output_dir=out_dir, save_artifacts=True)
+    assert len(first_backend.built_texts) == 4  # 2 oracle + 2 predicted graphs
+
+    # an interruption lost the predicted graph of docB
+    (out_dir / "artifacts" / "graphs" / "B" / "T" / "docB.json").unlink()
+    second_backend = _CountingBackend("B")
+    second_resolver = _CountingResolver("T")
+    second_resolver.returns_clusters = False
+    _patch_factories(monkeypatch, {"T": second_resolver}, {"B": second_backend})
+    second = run_experiment(corpus_path=corpus, language="en", resolver_names=["T"], graph_backend_names=["B"],
+                            output_dir=out_dir, save_artifacts=True, resume=True)
+    assert second_resolver.calls == []                     # saved texts reused
+    assert len(second_backend.built_texts) == 1            # only the missing graph is built
+    strip = lambda p: [r["graph_metrics"] for r in json.loads(p.read_text(encoding="utf-8"))["results"]]
+    assert strip(first) == strip(second)                   # same results as the uninterrupted run
+
+
+def test_resume_without_artifacts_is_refused(tmp_path):
+    with pytest.raises(ValueError, match="save_artifacts"):
+        run_experiment(corpus_path=_write_two_doc_corpus(tmp_path), language="en", resolver_names=["NoResolution"],
+                       graph_backend_names=["RuleBased"], output_dir=tmp_path / "r", resume=True)

@@ -13,6 +13,7 @@ from .graph.llm_v2_graph_adapter import LLMv2GraphAdapter
 from .graph.rule_based_graph_adapter import RuleBasedGraphAdapter
 from .report import build_results, render_html_report, save_html_report, save_results_json
 from .resolvers.base import supports_language
+from .types import ResolverOutput
 from .resolvers.lapin_liass_adapter import LapinLiassAdapter
 from .resolvers.llm_v2_adapter import LLMv2Adapter
 from .resolvers.gold_adapter import GoldAdapter
@@ -72,13 +73,13 @@ def _average_graph(doc_entries: list[dict]) -> dict:
     n = len(doc_entries)
     node_f1s = [e["graph_metrics"]["node_precision_recall_f1"]["f1"] for e in doc_entries]
     edge_f1s = [e["graph_metrics"]["edge_precision_recall_f1"]["f1"] for e in doc_entries]
-    smatch_f1s = [e["graph_metrics"]["smatch"]["f1"] for e in doc_entries]
+    triple_f1s = [e["graph_metrics"]["triple_f1"]["f1"] for e in doc_entries]
     oracle_dups = [e["graph_metrics"]["oracle_node_duplication_rate"] for e in doc_entries]
     predicted_dups = [e["graph_metrics"]["predicted_node_duplication_rate"] for e in doc_entries]
     return {
         "node_precision_recall_f1": {"f1": sum(node_f1s) / n},
         "edge_precision_recall_f1": {"f1": sum(edge_f1s) / n},
-        "smatch": {"f1": sum(smatch_f1s) / n},
+        "triple_f1": {"f1": sum(triple_f1s) / n},
         # Central to the design spec's oracle-ablation "error budget" framing:
         # aggregated here (and rendered by report.py) so it is visible without
         # digging through the per-document entries in results.json.
@@ -97,10 +98,14 @@ def run_experiment(
     embedder=None,
     coref_match: str = "exact",
     save_artifacts: bool = False,
+    resume: bool = False,
 ) -> Path:
     """... ``save_artifacts`` keeps every resolved text and graph under ``<output>/artifacts/``
     (texts/<resolver or ORACLE>/<doc>.txt, graphs/<backend>/<resolver or ORACLE>/<doc>.json)
-    for error analysis."""
+    for error analysis. ``resume`` (needs ``save_artifacts``) reuses the graphs and text-only
+    resolver texts an interrupted run of the same output left, so only the rest is computed."""
+    if resume and not save_artifacts:
+        raise ValueError("resume needs save_artifacts: it continues from the saved artifacts")
     if coref_match not in MATCH_MODES:
         raise ValueError(f"coref_match must be one of {MATCH_MODES}, not {coref_match!r}")
     documents = load_corefud_corpus(corpus_path)
@@ -163,15 +168,38 @@ def run_experiment(
         text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False, default=str)
         path.write_text(text, encoding="utf-8")
 
+    def saved(rel_path: str):
+        """With ``resume``, the artifact an earlier (interrupted) run of this output left, else None."""
+        if not resume:
+            return None
+        path = output_dir / "artifacts" / rel_path.replace(":", "_")
+        if not path.is_file():
+            return None
+        text = path.read_text(encoding="utf-8")
+        return json.loads(text) if path.suffix == ".json" else text
+
+    def build_graph(graph_backend, backend_name: str, who: str, doc_id: str, text: str) -> dict:
+        rel = f"graphs/{backend_name}/{who}/{doc_id}.json"
+        graph = saved(rel)
+        if graph is None:
+            graph = graph_backend.build(text)
+            save(rel, graph)
+        return graph
+
     for doc, oracle_text in zip(documents, oracle_texts):
         save(f"texts/ORACLE/{doc.doc_id}.txt", oracle_text)
 
     per_pairing = []
     for resolver_name, resolver in resolvers:
-        # Exactly one resolve() call per (resolver, document).
-        resolver_outputs = [resolver.resolve(doc) for doc in documents]
-        for doc, out in zip(documents, resolver_outputs):
+        # Exactly one resolve() call per (resolver, document). On resume, a text-only resolver's
+        # saved text is reused (that is all it returns); resolvers with clusters run again, since
+        # the clusters are not saved and those resolvers are cheap.
+        resolver_outputs = []
+        for doc in documents:
+            text = saved(f"texts/{resolver_name}/{doc.doc_id}.txt") if not getattr(resolver, "returns_clusters", True) else None
+            out = ResolverOutput(resolved_text=text, clusters=None) if text is not None else resolver.resolve(doc)
             save(f"texts/{resolver_name}/{doc.doc_id}.txt", out.resolved_text)
+            resolver_outputs.append(out)
         coref_metrics = _score_resolver(resolver_name, documents, resolver_outputs, key_path,
                                         key_text, coref_dir, coref_match)
         if coref_metrics is not None:
@@ -184,13 +212,13 @@ def run_experiment(
 
                 cache_key = (backend_name, doc_index)
                 if cache_key not in oracle_graph_cache:
-                    oracle_graph_cache[cache_key] = graph_backend.build(oracle_texts[doc_index])
-                    save(f"graphs/{backend_name}/ORACLE/{doc.doc_id}.json", oracle_graph_cache[cache_key])
+                    oracle_graph_cache[cache_key] = build_graph(graph_backend, backend_name, "ORACLE",
+                                                                doc.doc_id, oracle_texts[doc_index])
                 oracle_graph = oracle_graph_cache[cache_key]
 
                 # Genuinely depends on both resolver and backend: computed R x B.
-                predicted_graph = graph_backend.build(resolver_output.resolved_text)
-                save(f"graphs/{backend_name}/{resolver_name}/{doc.doc_id}.json", predicted_graph)
+                predicted_graph = build_graph(graph_backend, backend_name, resolver_name, doc.doc_id,
+                                              resolver_output.resolved_text)
 
                 graph_metrics = compute_graph_scores(oracle_graph, predicted_graph, graph_backend.backend_name)
 
@@ -241,6 +269,9 @@ def main(argv: list[str] | None = None) -> int:
                              "paraphrase-multilingual-mpnet-base-v2 for other languages")
     parser.add_argument("--save-artifacts", action="store_true",
                         help="keep every resolved text and graph under <output>/artifacts/")
+    parser.add_argument("--resume", action="store_true",
+                        help="with --save-artifacts: continue an interrupted run of the same --output, "
+                             "reusing its saved graphs and LLM resolver texts")
     parser.add_argument("--coref-match", choices=MATCH_MODES, default="exact",
                         help="CorefUD scorer mention matching (default: exact; 'head' needs mention "
                              "heads in the gold data, e.g. CorefUD/GUM, not converted RuCoCo)")
@@ -284,6 +315,7 @@ def main(argv: list[str] | None = None) -> int:
         embedder=embedder,
         coref_match=args.coref_match,
         save_artifacts=args.save_artifacts,
+        resume=args.resume,
     )
     if hasattr(llm_client, "usage"):
         run_config["llm"] = llm_client.usage()

@@ -14,6 +14,7 @@ class NoResolutionAdapter:
 
     name = "NoResolution"
     language_support = "any"
+    returns_clusters = False  # text only: a resumed run may reuse its saved text
 
     def resolve(self, doc: CorefDocument) -> ResolverOutput:
         return ResolverOutput(resolved_text=doc.text, clusters=None)

@@ -2,8 +2,10 @@ import sys
 import types
 
 import networkx as nx
+import pytest
 
-from pipeline.eval.graph_scoring import compute_graph_scores, compute_node_duplication_rate, compute_smatch
+from pipeline.eval.graph_scoring import (compute_graph_scores, compute_node_duplication_rate, compute_smatch,
+                                         compute_triple_f1)
 
 
 def _install_fake_graph_metrics(monkeypatch):
@@ -45,7 +47,7 @@ def test_identical_graphs_score_perfect_on_every_metric(monkeypatch):
     scores = compute_graph_scores(g, g, backend="RuleBased")
     assert scores["node_precision_recall_f1"]["f1"] == 1.0
     assert scores["edge_precision_recall_f1"]["f1"] == 1.0
-    assert scores["smatch"]["f1"] == 1.0
+    assert scores["triple_f1"]["f1"] == 1.0
 
 
 def test_predicted_missing_a_node_reduces_recall_not_precision(monkeypatch):
@@ -55,7 +57,7 @@ def test_predicted_missing_a_node_reduces_recall_not_precision(monkeypatch):
     scores = compute_graph_scores(oracle, predicted, backend="RuleBased")
     assert scores["node_precision_recall_f1"]["precision"] == 1.0
     assert scores["node_precision_recall_f1"]["recall"] == 0.5
-    assert 0.0 < scores["smatch"]["f1"] < 1.0
+    assert 0.0 < scores["triple_f1"]["f1"] < 1.0
 
 
 def test_node_duplication_rate_counts_repeated_labels(monkeypatch):
@@ -137,7 +139,7 @@ def test_two_empty_graphs_score_perfect_on_node_edge_and_smatch(monkeypatch):
     scores = compute_graph_scores(empty, empty, backend="RuleBased")
     assert scores["node_precision_recall_f1"] == {"precision": 1.0, "recall": 1.0, "f1": 1.0}
     assert scores["edge_precision_recall_f1"] == {"precision": 1.0, "recall": 1.0, "f1": 1.0}
-    assert scores["smatch"]["f1"] == 1.0
+    assert scores["triple_f1"]["f1"] == 1.0
 
 
 def test_one_sided_empty_graph_is_still_a_failure(monkeypatch):
@@ -173,7 +175,7 @@ def test_reversed_edge_direction_is_not_scored_as_a_match(monkeypatch):
     scores = compute_graph_scores(oracle, reversed_pred, backend="RuleBased")
     assert scores["node_precision_recall_f1"]["f1"] == 1.0  # same nodes
     assert scores["edge_precision_recall_f1"]["f1"] == 0.0  # opposite direction
-    assert scores["smatch"]["f1"] < 1.0
+    assert scores["triple_f1"]["f1"] < 1.0
 
 
 def test_edge_direction_preserved_for_id_based_backends(monkeypatch):
@@ -191,3 +193,56 @@ def test_amr_line_for_directed_edges_is_still_parseable_by_smatch(monkeypatch):
     _install_fake_graph_metrics(monkeypatch)
     g = _rule_based_graph(["john", "mary"], [("john", "mary", "hit")])
     assert compute_smatch(g, g, backend="RuleBased")["f1"] == 1.0
+
+
+# --- 2026-10-05: smatch on the graphs' own triples (no synthetic root) ---
+
+
+def _llm_graph(labels, edges):
+    return {"nodes": [{"id": f"n{i}", "label": l} for i, l in enumerate(labels)],
+            "edges": [{"source": f"n{a}", "target": f"n{b}", "label": r} for a, b, r in edges]}
+
+
+def test_smatch_of_graphs_with_nothing_in_common_is_zero():
+    """The old serialisation hung every node under a synthetic root with :has-entityN edges;
+    those scaffolding triples matched by position and gave unrelated graphs a positive score."""
+    a = {"nodes": ["alpha", "beta", "gamma"], "edges": [{"agent_1": "alpha", "agent_2": "beta", "meaning": "likes", "weight": 1}]}
+    b = {"nodes": ["delta", "epsilon", "zeta"], "edges": [{"agent_1": "delta", "agent_2": "epsilon", "meaning": "hates", "weight": 1}]}
+    assert compute_smatch(a, b, backend="RuleBased")["f1"] == 0.0
+
+
+def test_smatch_counts_only_real_triples():
+    a = {"nodes": ["alpha", "beta"], "edges": [{"agent_1": "alpha", "agent_2": "beta", "meaning": "likes", "weight": 1}]}
+    b = {"nodes": ["alpha", "beta"], "edges": [{"agent_1": "alpha", "agent_2": "beta", "meaning": "hates", "weight": 1}]}
+    # 2 instance triples match, the relation does not: 2 of 3 on each side
+    assert compute_smatch(a, b, backend="RuleBased")["f1"] == pytest.approx(2 / 3)
+
+
+def test_triple_f1_of_a_450_node_graph_is_fast_and_small():
+    """Document-sized graphs: Smatch's search was OOM-killed at >12 GB here (2026-10-05)."""
+    resource = pytest.importorskip("resource")  # Linux (the Docker image); not on Windows
+    import time
+
+    labels = [f"entity {i}" for i in range(450)]
+    edges = [(i, (i * 7 + 3) % 450, f"rel {i % 37}") for i in range(440)]
+    a = _llm_graph(labels, edges)
+    b = _llm_graph(labels[:300] + [f"other {i}" for i in range(150)], edges[::2])
+    before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    t = time.time()
+    f1 = compute_triple_f1(a, b, backend="LLMv2")["f1"]
+    assert 0.0 < f1 < 1.0
+    assert time.time() - t < 5
+    assert resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - before < 2_000_000  # KiB: < 2 GB growth
+
+
+def test_triple_f1_counts_nodes_and_edges_under_label_alignment():
+    a = {"nodes": ["alpha", "beta", "gamma"], "edges": [{"agent_1": "alpha", "agent_2": "beta", "meaning": "likes", "weight": 1}]}
+    b = {"nodes": ["alpha", "beta", "delta"], "edges": [{"agent_1": "alpha", "agent_2": "beta", "meaning": "likes", "weight": 1}]}
+    # 2 nodes + 1 edge match out of 4 triples on each side
+    assert compute_triple_f1(a, b, backend="RuleBased")["f1"] == pytest.approx(3 / 4)
+
+
+def test_triple_f1_equals_smatch_where_the_label_alignment_is_optimal():
+    a = {"nodes": ["alpha", "beta"], "edges": [{"agent_1": "alpha", "agent_2": "beta", "meaning": "likes", "weight": 1}]}
+    b = {"nodes": ["alpha", "beta"], "edges": [{"agent_1": "alpha", "agent_2": "beta", "meaning": "hates", "weight": 1}]}
+    assert compute_triple_f1(a, b, backend="RuleBased")["f1"] == pytest.approx(compute_smatch(a, b, backend="RuleBased")["f1"])

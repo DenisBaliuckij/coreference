@@ -9,6 +9,7 @@ from ..types import CorefDocument, ResolverOutput
 class LLMv2Adapter:
     name = "LLMv2"
     language_support = "any"
+    returns_clusters = False  # text only: a resumed run may reuse its saved text
 
     def __init__(self, llm_client, language: str, base_dir: Path | None = None):
         self.llm_client = llm_client

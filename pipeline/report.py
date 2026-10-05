@@ -37,13 +37,13 @@ def render_html_report(results: dict) -> str:
         conll_f1 = coref["conll_f1"] if coref else None
         node_f1 = graph.get("node_precision_recall_f1", {}).get("f1")
         edge_f1 = graph.get("edge_precision_recall_f1", {}).get("f1")
-        smatch_f1 = graph.get("smatch", {}).get("f1")
+        triple_f1 = graph.get("triple_f1", {}).get("f1")
         oracle_dup = graph.get("oracle_node_duplication_rate")
         predicted_dup = graph.get("predicted_node_duplication_rate")
         rows.append(
             f"<tr><td>{entry['resolver']}</td><td>{entry['graph_backend']}</td>"
             f"<td>{_fmt(conll_f1)}</td><td>{_fmt(node_f1)}</td>"
-            f"<td>{_fmt(edge_f1)}</td><td>{_fmt(smatch_f1)}</td>"
+            f"<td>{_fmt(edge_f1)}</td><td>{_fmt(triple_f1)}</td>"
             f"<td>{_fmt(oracle_dup)}</td><td>{_fmt(predicted_dup)}</td></tr>"
         )
     table_rows = "\n".join(rows)
@@ -54,7 +54,7 @@ def render_html_report(results: dict) -> str:
 <p>Language: {results['language']} | Generated: {results['generated_at']}</p>
 <table border="1" cellpadding="4" cellspacing="0">
 <thead><tr><th>Resolver</th><th>Graph backend</th><th>CoNLL F1</th>
-<th>Node F1</th><th>Edge F1</th><th>Smatch F1</th>
+<th>Node F1</th><th>Edge F1</th><th>Triple F1</th>
 <th>Oracle node dup. rate</th><th>Predicted node dup. rate</th></tr></thead>
 <tbody>
 {table_rows}

@@ -35,3 +35,10 @@ def test_text_diagnostics_measures_pronouns_and_similarity(tmp_path):
     assert t["NoResolution"]["pronouns_per_1000_words"] == pytest.approx(250.0)
     assert t["LLMv2"]["pronouns_per_1000_words"] == 0.0
     assert t["LLMv2"]["char_similarity_to_oracle"] == pytest.approx(1.0)
+
+
+def test_resampled_documents_are_separated_by_a_blank_line():
+    from pipeline.analysis.summarize import _join_blocks
+
+    text = _join_blocks(["# global.Entity = x"], ["# newdoc id = a\n1\tx", "# newdoc id = b\n1\ty\n"])
+    assert text == "# global.Entity = x\n# newdoc id = a\n1\tx\n\n# newdoc id = b\n1\ty\n\n"
