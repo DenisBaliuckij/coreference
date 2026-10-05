@@ -52,3 +52,31 @@ def test_multiple_clusters_applied_without_offset_corruption():
     clusters = [[MentionSpan(0, 0), MentionSpan(4, 4)], [MentionSpan(2, 2), MentionSpan(6, 6)]]
     doc = _doc(text, tokens, clusters)
     assert build_oracle_text(doc) == "John met Mary. John greeted Mary."
+
+
+def _toks(words):
+    out, pos = [], 0
+    for i, w in enumerate(words):
+        out.append(Token(i, w, pos, pos + len(w), 0))
+        pos += len(w) + 1
+    return " ".join(words), out
+
+
+def test_nested_mentions_are_replaced_by_the_outer_mention_only():
+    # "Dvorak arrived . His native Bohemia welcomed him ." with chains
+    # {Dvorak, His, him} and {Bohemia-the-region: "Bohemia", "His native Bohemia"}
+    text, tokens = _toks(["Bohemia", "and", "Dvorak", ".", "His", "native", "Bohemia", "welcomed", "him", "."])
+    clusters = [[MentionSpan(2, 2), MentionSpan(4, 4), MentionSpan(8, 8)],
+                [MentionSpan(0, 0), MentionSpan(4, 6)]]
+    doc = _doc(text, tokens, clusters)
+    # the outer span "His native Bohemia" becomes "Bohemia"; the nested "His" is not applied
+    # on top of it (that used to shift the outer span's end offset and garble the text)
+    assert build_oracle_text(doc) == "Bohemia and Dvorak . Bohemia welcomed Dvorak ."
+
+
+def test_pronoun_mode_replaces_only_pronominal_mentions():
+    text, tokens = _toks(["Dvorak", "was", "a", "composer", ".", "He", "left", "."])
+    clusters = [[MentionSpan(0, 0), MentionSpan(2, 3), MentionSpan(5, 5)]]
+    doc = _doc(text, tokens, clusters)
+    assert build_oracle_text(doc, mode="pronouns", language="en") == "Dvorak was a composer . Dvorak left ."
+    assert build_oracle_text(doc) == "Dvorak was Dvorak . Dvorak left ."

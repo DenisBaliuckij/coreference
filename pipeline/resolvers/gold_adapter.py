@@ -16,5 +16,9 @@ class GoldAdapter:
     name = "Gold"
     language_support = "any"
 
+    def __init__(self, oracle_mode: str = "all", language: str = "en"):
+        self.oracle_mode = oracle_mode
+        self.language = language
+
     def resolve(self, doc: CorefDocument) -> ResolverOutput:
-        return ResolverOutput(resolved_text=build_oracle_text(doc), clusters=[list(c) for c in doc.clusters])
+        return ResolverOutput(resolved_text=build_oracle_text(doc, mode=self.oracle_mode, language=self.language), clusters=[list(c) for c in doc.clusters])

@@ -239,7 +239,7 @@ def _patch_factories(monkeypatch, resolvers_by_name, backends_by_name):
 
     monkeypatch.setattr(
         run_experiment_module, "_build_resolver",
-        lambda name, language, llm_client=None: resolvers_by_name[name],
+        lambda name, language, llm_client=None, **_: resolvers_by_name[name],
     )
     monkeypatch.setattr(
         run_experiment_module, "_build_graph_backend",
@@ -337,7 +337,7 @@ def test_language_mismatch_on_the_backend_alone_also_raises(monkeypatch, tmp_pat
     any_language_resolver.language_support = "any"
     monkeypatch.setattr(
         run_experiment_module, "_build_resolver",
-        lambda name, language, llm_client=None: any_language_resolver,
+        lambda name, language, llm_client=None, **_: any_language_resolver,
     )
 
     try:
@@ -375,7 +375,7 @@ def test_resolver_returning_none_clusters_flows_through_to_na_in_the_report(
     text_only_resolver = _CountingResolver("TextOnly")  # clusters_factory=None -> clusters=None
     monkeypatch.setattr(
         run_experiment_module, "_build_resolver",
-        lambda name, language, llm_client=None: text_only_resolver,
+        lambda name, language, llm_client=None, **_: text_only_resolver,
     )
 
     output_dir = tmp_path / "run_text_only"

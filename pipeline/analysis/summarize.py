@@ -31,18 +31,10 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from ..corpus.corefud_loader import parse_conllu
+from ..corpus.pronouns import PRONOUNS
 from ..eval.corefud_scoring import MATCH_MODES, score_corpus, scorer_available
 from ..eval.graph_scoring import compute_graph_scores
 
-PRONOUNS = {
-    "en": set("he him his himself she her hers herself it its itself they them their theirs themselves "
-              "this that these those who whom whose which".split()),
-    "ru": set("он его него ему нему им ним нём нем она её ее неё нее ей ней ею нею оно они их них им ним "
-              "ими ними свой своя своё свое свои своего своей своему своим своих своими себя себе собой "
-              "этот эта это эти этого этой этому этим этих этими тот та то те того той тому тем тех теми "
-              "который которая которое которые которого которой которому которым которых которыми "
-              "котором".split()),
-}
 WORD = re.compile(r"\w+", re.UNICODE)
 
 

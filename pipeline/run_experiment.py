@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 from .corpus.corefud_loader import load_corefud_corpus
-from .corpus.oracle import build_oracle_text
+from .corpus.oracle import ORACLE_MODES, build_oracle_text
 from .eval.corefud_scoring import MATCH_MODES, normalized_key, score_corpus, write_response
 from .eval.graph_scoring import compute_graph_scores
 from .graph.llm_v2_graph_adapter import LLMv2GraphAdapter
@@ -21,11 +21,11 @@ from .resolvers.no_resolution_adapter import NoResolutionAdapter
 from .resolvers.spacy_neural_adapter import SpacyNeuralAdapter
 
 
-def _build_resolver(name: str, language: str, llm_client=None):
+def _build_resolver(name: str, language: str, llm_client=None, oracle_mode: str = "all"):
     if name == "NoResolution":
         return NoResolutionAdapter()
     if name == "Gold":
-        return GoldAdapter()
+        return GoldAdapter(oracle_mode=oracle_mode, language=language)
     if name == "LapinLiass":
         return LapinLiassAdapter()
     if name == "SpacyNeural":
@@ -99,11 +99,14 @@ def run_experiment(
     coref_match: str = "exact",
     save_artifacts: bool = False,
     resume: bool = False,
+    oracle_mode: str = "all",
 ) -> Path:
     """... ``save_artifacts`` keeps every resolved text and graph under ``<output>/artifacts/``
     (texts/<resolver or ORACLE>/<doc>.txt, graphs/<backend>/<resolver or ORACLE>/<doc>.json)
     for error analysis. ``resume`` (needs ``save_artifacts``) reuses the graphs and text-only
-    resolver texts an interrupted run of the same output left, so only the rest is computed."""
+    resolver texts an interrupted run of the same output left, so only the rest is computed.
+    ``oracle_mode`` (corpus.oracle.ORACLE_MODES): which gold mentions the oracle text (and the
+    Gold control) replaces -- every non-head mention, or only pronominal ones."""
     if resume and not save_artifacts:
         raise ValueError("resume needs save_artifacts: it continues from the saved artifacts")
     if coref_match not in MATCH_MODES:
@@ -112,7 +115,7 @@ def run_experiment(
 
     resolvers, skipped_resolvers = [], []
     for resolver_name in resolver_names:
-        resolver = _build_resolver(resolver_name, language, llm_client=llm_client)
+        resolver = _build_resolver(resolver_name, language, llm_client=llm_client, oracle_mode=oracle_mode)
         if supports_language(resolver, language):
             resolvers.append((resolver_name, resolver))
         else:
@@ -143,7 +146,7 @@ def run_experiment(
     # them inside the backend loop wasted R x B work and, worse, let a
     # non-deterministic resolver (LLMv2) hand a *different* resolved text to
     # each backend, breaking the apples-to-apples comparison the report implies.
-    oracle_texts = [build_oracle_text(doc) for doc in documents]
+    oracle_texts = [build_oracle_text(doc, mode=oracle_mode, language=language) for doc in documents]
 
     # Keyed by (backend_name, document position): the oracle graph depends on
     # the backend and the document only, so it is built once per pair and
@@ -178,9 +181,18 @@ def run_experiment(
         text = path.read_text(encoding="utf-8")
         return json.loads(text) if path.suffix == ".json" else text
 
+    # The texts an earlier run left, read before this run overwrites them: a saved graph is only
+    # reused if it was built from the same text (e.g. not after a change to the oracle builder).
+    previous_texts: dict[str, str | None] = {}
+    if resume:
+        for doc in documents:
+            for who in ["ORACLE"] + [name for name, _ in resolvers]:
+                rel = f"texts/{who}/{doc.doc_id}.txt"
+                previous_texts[rel] = saved(rel)
+
     def build_graph(graph_backend, backend_name: str, who: str, doc_id: str, text: str) -> dict:
         rel = f"graphs/{backend_name}/{who}/{doc_id}.json"
-        graph = saved(rel)
+        graph = saved(rel) if previous_texts.get(f"texts/{who}/{doc_id}.txt") == text else None
         if graph is None:
             graph = graph_backend.build(text)
             save(rel, graph)
@@ -196,7 +208,8 @@ def run_experiment(
         # the clusters are not saved and those resolvers are cheap.
         resolver_outputs = []
         for doc in documents:
-            text = saved(f"texts/{resolver_name}/{doc.doc_id}.txt") if not getattr(resolver, "returns_clusters", True) else None
+            text = (previous_texts.get(f"texts/{resolver_name}/{doc.doc_id}.txt")
+                    if not getattr(resolver, "returns_clusters", True) else None)
             out = ResolverOutput(resolved_text=text, clusters=None) if text is not None else resolver.resolve(doc)
             save(f"texts/{resolver_name}/{doc.doc_id}.txt", out.resolved_text)
             resolver_outputs.append(out)
@@ -272,6 +285,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--resume", action="store_true",
                         help="with --save-artifacts: continue an interrupted run of the same --output, "
                              "reusing its saved graphs and LLM resolver texts")
+    parser.add_argument("--oracle-mode", choices=ORACLE_MODES, default="all",
+                        help="gold mentions the oracle text replaces with their cluster's first mention: "
+                             "'all' non-head mentions (default) or only single-word 'pronouns'")
     parser.add_argument("--coref-match", choices=MATCH_MODES, default="exact",
                         help="CorefUD scorer mention matching (default: exact; 'head' needs mention "
                              "heads in the gold data, e.g. CorefUD/GUM, not converted RuCoCo)")
@@ -316,6 +332,7 @@ def main(argv: list[str] | None = None) -> int:
         coref_match=args.coref_match,
         save_artifacts=args.save_artifacts,
         resume=args.resume,
+        oracle_mode=args.oracle_mode,
     )
     if hasattr(llm_client, "usage"):
         run_config["llm"] = llm_client.usage()

@@ -90,3 +90,26 @@ def test_resume_without_artifacts_is_refused(tmp_path):
     with pytest.raises(ValueError, match="save_artifacts"):
         run_experiment(corpus_path=_write_two_doc_corpus(tmp_path), language="en", resolver_names=["NoResolution"],
                        graph_backend_names=["RuleBased"], output_dir=tmp_path / "r", resume=True)
+
+
+def test_resume_rebuilds_a_graph_whose_text_changed(monkeypatch, tmp_path):
+    from tests.pipeline.test_run_experiment_smoke import _CountingBackend, _CountingResolver, _patch_factories
+
+    _install_fake_graph_metrics_module(monkeypatch)
+    corpus = _write_two_doc_corpus(tmp_path)
+    out_dir = tmp_path / "run"
+    resolver = _CountingResolver("T")
+    resolver.returns_clusters = False
+    _patch_factories(monkeypatch, {"T": resolver}, {"B": _CountingBackend("B")})
+    run_experiment(corpus_path=corpus, language="en", resolver_names=["T"], graph_backend_names=["B"],
+                   output_dir=out_dir, save_artifacts=True)
+
+    # the oracle text of docA changes (as after the nested-mention fix): its graph must be rebuilt
+    (out_dir / "artifacts" / "texts" / "ORACLE" / "docA.txt").write_text("stale oracle text", encoding="utf-8")
+    backend = _CountingBackend("B")
+    resolver2 = _CountingResolver("T")
+    resolver2.returns_clusters = False
+    _patch_factories(monkeypatch, {"T": resolver2}, {"B": backend})
+    run_experiment(corpus_path=corpus, language="en", resolver_names=["T"], graph_backend_names=["B"],
+                   output_dir=out_dir, save_artifacts=True, resume=True)
+    assert len(backend.built_texts) == 1 and resolver2.calls == []
