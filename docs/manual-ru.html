@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Руководство пользователя экспериментального стенда</title>
+<style>
+  @page { size: A4; margin: 18mm 17mm 18mm 17mm; }
+  :root { --ink: #1d2433; --muted: #5b6475; --accent: #2f5d9e; --line: #d6dbe4; --soft: #f3f5f9; --warn: #fff6e5; --warnline: #e3b35b; }
+  body { font-family: "Segoe UI", "Noto Sans", Arial, sans-serif; color: var(--ink); font-size: 10.4pt; line-height: 1.5; margin: 0; }
+  h1 { font-size: 24pt; line-height: 1.2; margin: 0 0 8mm; color: var(--accent); }
+  h2 { font-size: 15pt; color: var(--accent); border-bottom: 1.5px solid var(--accent); padding-bottom: 2mm; margin: 0 0 4mm; page-break-before: always; }
+  h3 { font-size: 11.5pt; margin: 5mm 0 2mm; }
+  p { margin: 0 0 2.6mm; }
+  code, pre { font-family: "Cascadia Mono", Consolas, "DejaVu Sans Mono", monospace; font-size: 8.8pt; }
+  code { background: var(--soft); padding: 0 2px; border-radius: 2px; }
+  pre { background: var(--soft); border: 1px solid var(--line); border-radius: 3px; padding: 2.5mm 3mm; white-space: pre-wrap; word-break: break-word; margin: 1.5mm 0 3.5mm; }
+  table { border-collapse: collapse; width: 100%; margin: 2mm 0 4mm; font-size: 9.4pt; page-break-inside: avoid; }
+  th, td { border: 1px solid var(--line); padding: 1.6mm 2mm; text-align: left; vertical-align: top; }
+  th { background: var(--soft); }
+  ol.steps { padding-left: 6mm; } ol.steps li { margin-bottom: 2.5mm; }
+  .note { background: var(--warn); border-left: 3px solid var(--warnline); padding: 2.5mm 3.5mm; margin: 3mm 0; page-break-inside: avoid; }
+  .new { display: inline-block; font-size: 7.5pt; font-weight: 600; color: #fff; background: var(--accent); border-radius: 2px; padding: 0 4px; margin-left: 4px; vertical-align: 2px; }
+  .cover { height: 245mm; display: flex; flex-direction: column; justify-content: space-between; }
+  .kicker { letter-spacing: .18em; font-size: 9pt; color: var(--muted); text-transform: uppercase; margin-bottom: 10mm; }
+  .lead { font-size: 12pt; color: var(--muted); max-width: 150mm; }
+  .who { border-top: 1px solid var(--line); padding-top: 4mm; color: var(--muted); font-size: 9.6pt; }
+  .toc ol { font-size: 11pt; line-height: 2; }
+  .footer { color: var(--muted); font-size: 8.5pt; border-top: 1px solid var(--line); padding-top: 3mm; margin-top: 8mm; }
+</style>
+</head>
+<body>
+
+<section class="cover">
+  <div>
+    <div class="kicker">Материалы к диссертационному исследованию</div>
+    <h1>Руководство пользователя экспериментального стенда каскадной архитектуры</h1>
+    <p class="lead">Установка и запуск в Docker, подготовка корпусов (английский GUM, русский RuCoCo), прогон эксперимента
+      с официальным скорером CorefUD и LLM-резолвером, чтение результатов, статистический анализ и расширение стенда.</p>
+  </div>
+  <div class="who">
+    <p><b>Для кого этот документ.</b> Для тех, кто запускает эксперименты на стенде, интерпретирует результаты и расширяет стенд
+      новыми резолверами, бэкендами или языками. Архитектурный обзор — в <code>experimental-stand-scheme.pdf</code>.</p>
+    <p>Версия 2 (5 октября 2026): официальный скорер CorefUD на уровне корпуса, Docker-образ, корпуса GUM и RuCoCo,
+      LLM-резолвер для русского через OpenAI-совместимый сервер, контрольные резолверы NoResolution и Gold, сохранение
+      артефактов, скрипт статистического анализа. Исходник документа — <code>docs/manual-ru.html</code>.</p>
+    <p>Репозиторий: <code>coreference</code>, ветка <code>cascade-experimental-stand</code>.</p>
+  </div>
+</section>
+
+<section class="toc">
+  <h2>Оглавление</h2>
+  <ol>
+    <li>Назначение и ключевая идея стенда</li>
+    <li>Установка: Docker-образ (рекомендуется) и локальная установка</li>
+    <li>Структура репозитория</li>
+    <li>Корпуса: английский GUM и русский RuCoCo</li>
+    <li>Первый запуск и полный эксперимент</li>
+    <li>Формат входного корпуса (CoNLL-U / CorefUD)</li>
+    <li>Параметры командной строки</li>
+    <li>Резолверы, контрольные условия и бэкенды графа</li>
+    <li>LLM-компоненты через OpenAI-совместимый сервер</li>
+    <li>Формат и чтение результатов</li>
+    <li>Метрики и официальный скорер CorefUD</li>
+    <li>Статистический анализ результатов</li>
+    <li>Тестирование стенда</li>
+    <li>Известные ограничения</li>
+    <li>Расширение стенда</li>
+    <li>Частые вопросы и типичные ошибки</li>
+  </ol>
+</section>
+
+<h2>1. Назначение и ключевая идея стенда</h2>
+<p>Стенд автоматизирует исследовательский эксперимент по <b>каскадной</b> интеграции разрешения кореференции в построение
+семантического графа: сначала резолвер разрешает кореференцию в тексте, затем из полученного текста строится граф. На входе —
+корпус с золотой разметкой кореференции в формате CoNLL-U (нотация CorefUD), на выходе — качество разрешения кореференции и
+качество графа.</p>
+<p>Ключевой инструмент — <b>oracle-абляция</b>. Для каждого документа граф строится по двум текстам:</p>
+<ul>
+  <li><b>oracle-граф</b> — по тексту, в котором все упоминания каждой золотой цепочки заменены на форму её первого упоминания
+    (без участия модели). Это верхняя граница: граф при идеальном разрешении кореференции;</li>
+  <li><b>predicted-граф</b> — по тексту, обработанному реальным резолвером.</li>
+</ul>
+<p>Разрыв между ними — «бюджет ошибок», вносимый этапом разрешения кореференции (гипотеза H1 диссертационного плана). Для
+корректного чтения этого разрыва стенд содержит два контрольных условия <span class="new">новое</span>:
+<b>NoResolution</b> (текст не меняется — нижняя граница) и <b>Gold</b> (золотой текст ещё раз — потолок, достижимый при данной
+воспроизводимости бэкенда). Реальные резолверы располагаются между этими двумя точками; доля пройденного пути — «gap closed»
+(раздел 12).</p>
+
+<h2>2. Установка: Docker-образ (рекомендуется) и локальная установка</h2>
+<h3>Docker <span class="new">новое</span></h3>
+<p>Каталог <code>docker/</code> содержит <code>Dockerfile</code> и <code>run.sh</code>. Образ включает всё нужное для прогонов, ничего не
+устанавливая на хост: Python 3.11, spaCy 3.8 с <code>en_core_web_sm</code>/<code>en_core_web_lg</code>, WordNet для NLTK (распакованный —
+NLTK 3.10 не читает zip), <code>udapi</code> и официальный скорер CorefUD (зафиксированный коммит <code>4fd7b0e</code>), CPU-версию
+PyTorch, <code>sentence-transformers</code> и зависимости LLMv2 (pymorphy3, razdel, scikit-learn, hdbscan), а также две модели
+эмбеддингов, загруженные при сборке (во время прогона сеть HuggingFace не нужна).</p>
+<p>Контекст сборки — каталог, где рядом лежат <code>coreference/</code> (этот репозиторий) и <code>text-corpuses-processing/</code> (нужен
+каталог <code>dags/</code>; в образе он попадает в <code>/text-corpuses-processing/dags</code> — путь по умолчанию стенда):</p>
+<pre>experiments/coreference/
+  Dockerfile  run.sh            # из coreference/docker/
+  coreference/                  # git archive ветки cascade-experimental-stand
+  text-corpuses-processing/dags/
+  corpora/                      # корпуса (монтируются только для чтения)
+  reports/                      # результаты
+
+docker build -t coref-experiment:latest --build-arg BUILD_INFO="coreference &lt;commit&gt; ..." .
+./run.sh tests                 # все тесты в контейнере
+./run.sh smoke                 # сквозной прогон на data/corpora/sample_en_mini.conllu
+./run.sh python -m pipeline.run_experiment ...</pre>
+<p><code>run.sh</code> запускает одноразовые контейнеры (<code>--rm</code>) от имени пользователя 1000 с сетью хоста — чтобы
+<code>--llm-endpoint http://127.0.0.1:8081/v1</code> доходил до llama-server, слушающего только 127.0.0.1. Монтируются
+<code>./corpora</code> → <code>/corpora</code> (только чтение) и <code>./reports</code> → <code>/reports</code>.</p>
+<h3>Локальная установка</h3>
+<ol class="steps">
+  <li><code>pip install -r requirements.txt</code> — networkx, numpy, scipy, smatch, udapi, pytest.</li>
+  <li>Склонируйте официальный скорер <code>https://github.com/ufal/corefud-scorer</code>, установите его зависимости и укажите путь к
+    <code>corefud-scorer.py</code> в переменной <code>COREFUD_SCORER</code>. Без скорера прогоны резолверов, выдающих кластеры, завершаются
+    ошибкой, а соответствующие тесты пропускаются.</li>
+  <li>Положите <code>text-corpuses-processing</code> рядом (<code>../text-corpuses-processing</code>) или задайте
+    <code>TEXT_CORPUSES_PROCESSING_DAGS</code> — путь прямо к его <code>dags/</code>.</li>
+  <li>Для реальных прогонов: LapinLiass — <code>en_core_web_sm</code>; RuleBased — <code>en_core_web_lg</code> и WordNet; LLMv2 — torch,
+    transformers, sentence-transformers и модели эмбеддингов; SpacyNeural — <code>en_coreference_web_trf</code> (только Python 3.8–3.10 и
+    spaCy 3.4–3.5, поэтому в общий образ не входит).</li>
+</ol>
+
+<h2>3. Структура репозитория</h2>
+<pre>coreference/
+  pipeline/
+    types.py                     # Token, MentionSpan, CorefDocument, ResolverOutput
+    sys_path_setup.py            # подключение text-corpuses-processing через sys.path
+    corpus/
+      corefud_loader.py          # разбор CoNLL-U с нотацией Entity=
+      oracle.py                  # oracle-текст по золотым кластерам
+      rucoco_convert.py          # RuCoCo (JSON) -&gt; CorefUD CoNLL-U                 [новое]
+    resolvers/
+      base.py                    # интерфейс, проекция спанов, UnionFind
+      lapin_liass_adapter.py     # правиловый резолвер (EN)
+      spacy_neural_adapter.py    # нейросетевой резолвер spaCy (EN)
+      llm_v2_adapter.py          # LLM-резолвер (любой язык с промпт-файлом)
+      no_resolution_adapter.py   # контроль: текст без изменений                     [новое]
+      gold_adapter.py            # контроль: золотой текст и золотые кластеры         [новое]
+    graph/
+      rule_based_graph_adapter.py, llm_v2_graph_adapter.py, penman_convert.py, base.py
+    llm/openai_client.py         # LLM через OpenAI-совместимый сервер                [новое]
+    eval/
+      corefud_scoring.py         # key/response + официальный скорер CorefUD          [новое]
+      graph_scoring.py           # P/R по узлам и рёбрам, дубли, Smatch
+    analysis/summarize.py        # таблицы с бутстрэп-интервалами, диагностика        [новое]
+    report.py, run_experiment.py
+  data/corpora/sample_en_mini.conllu
+  docker/Dockerfile, docker/run.sh                                                    [новое]
+  docs/manual-ru.html            # исходник этого документа
+  tests/pipeline/                # 109 тестов</pre>
+
+<h2>4. Корпуса: английский GUM и русский RuCoCo <span class="new">новое</span></h2>
+<p>Сводный корпус CorefUD (репозиторий LINDAT) с хоста эксперимента недоступен — сайт отвечает HTTP 451 (юридическая
+блокировка); обходить её не следует. Поэтому английский и русский берутся из первоисточников.</p>
+<h3>Английский — GUM</h3>
+<p><code>https://github.com/amir-zeldes/gum</code>, каталог <code>dep/</code> — это же исходный корпус английской части CorefUD. Файлы уже
+содержат разметку <code>Entity=</code> (схема атрибутов GUM: <code>GRP-etype-infstat-...</code>) и читаются стендом без конвертации.
+Разбиение — официальное из <code>splits.md</code>; документы <code>GUM_reddit_*</code> исключаются (их текст в репозитории замаскирован
+подчёркиваниями):</p>
+<table><tr><th>Часть</th><th>Документов</th><th>Токенов</th></tr>
+<tr><td>train</td><td>197</td><td>~200 тыс.</td></tr><tr><td>dev</td><td>30</td><td>~28 тыс.</td></tr>
+<tr><td>test</td><td>30</td><td>~28 тыс.</td></tr><tr><td>gentle_ood (внедоменный GENTLE)</td><td>26</td><td>~18 тыс.</td></tr></table>
+<h3>Русский — RuCoCo</h3>
+<p><code>https://github.com/vdobrovolskii/rucoco</code>, релиз v1.0.0: JSON с полями <code>text</code>, <code>entities</code> (символьные спаны
+упоминаний каждой сущности) и <code>includes</code> (расщеплённые антецеденты). Конвертация:</p>
+<pre>python -m pipeline.corpus.rucoco_convert RUCOCO_JSON_DIR OUTPUT_DIR</pre>
+<p>Токенизация — правиловый токенизатор spaCy для русского (без загрузки модели); предложения — <code>sentencizer</code> плюс границы
+абзацев, но никогда внутри упоминания (упоминания CorefUD не пересекают границу предложения). Синтаксиса нет (<code>HEAD = 0</code>),
+поэтому для RuCoCo используется только <code>--coref-match exact</code>. Расщеплённые антецеденты подсчитываются, но не записываются —
+официальный скорер их не оценивает. Результат v1.0.0: 3075 документов, ~1,22 млн токенов, 38 877 сущностей, 150 405 упоминаний,
+0 несопоставленных упоминаний, 2978 расщеплённых антецедентов. Для экспериментов с LLM используется фиксированная выборка
+<code>sample150</code> (150 документов, <code>random.Random(20261005).sample</code> по отсортированному списку файлов).</p>
+
+<h2>5. Первый запуск и полный эксперимент</h2>
+<ol class="steps">
+  <li>Соберите образ и проверьте его: <code>./run.sh tests</code> (109 тестов), <code>./run.sh smoke</code> (результат в
+    <code>reports/smoke_en/</code>; на учебном примере все метрики равны 1,0).</li>
+  <li>Английский эксперимент на тестовой части GUM (все резолверы, оба бэкенда, сопоставление по вершинам — стандарт CRAC):
+<pre>./run.sh python -m pipeline.run_experiment --corpus /corpora/en_gum/test --language en \
+  --resolvers NoResolution,LapinLiass,LLMv2,Gold --graph-backends RuleBased,LLMv2 \
+  --coref-match head --llm-endpoint http://127.0.0.1:8081/v1 --llm-model qwen3.8:27b-mtp-128k \
+  --save-artifacts --output /reports/full_en_gum_test</pre></li>
+  <li>Русский эксперимент на выборке RuCoCo:
+<pre>./run.sh python -m pipeline.run_experiment --corpus /corpora/ru_rucoco/sample150 --language ru \
+  --resolvers NoResolution,LLMv2,Gold --graph-backends LLMv2 --coref-match exact \
+  --llm-endpoint http://127.0.0.1:8081/v1 --llm-model qwen3.8:27b-mtp-128k \
+  --save-artifacts --output /reports/full_ru_rucoco_sample150</pre></li>
+  <li>Сводка с доверительными интервалами:
+<pre>./run.sh python -m pipeline.analysis.summarize /reports/full_en_gum_test \
+  /reports/full_ru_rucoco_sample150 --out /reports/summary --bootstrap 1000</pre></li>
+</ol>
+<div class="note">Долгие прогоны запускайте через <code>nohup ./run.sh ... &gt; logs/имя.log 2&gt;&amp;1 &amp;</code> — тогда обрыв SSH-сессии их не
+прерывает. Ориентиры по времени на qwen3.8 (27B) через llama-server: ~15 с на граф LLMv2 для документа RuCoCo, ~35–40 с для
+документа GUM.</div>
+
+<h2>6. Формат входного корпуса (CoNLL-U / CorefUD)</h2>
+<p>Файлы <code>.conllu</code> с атрибутом <code>Entity=</code> в колонке MISC. Поддерживаются однотокенные (<code>(e1-person-1-new)</code>) и
+многотокенные упоминания (открывающая и закрывающая скобки), несколько скобок в одном значении без разделителя
+(<code>e1)(e2-loc-...</code>), пустые узлы (<code>N.1</code>) для нулевой анафоры и несколько документов в файле (<code># newdoc</code>).
+Текст восстанавливается по токенам с учётом <code>SpaceAfter=No</code>; упоминания на пустых узлах помечаются как нулевые и не
+подставляются в oracle-текст.</p>
+<pre># newdoc id = sample1
+# sent_id = sample1-1
+1  John     John    PROPN  _  _  2  nsubj  _  Entity=(e1-person-1-new-1-sgl-1)
+2  arrived  arrive  VERB   _  _  0  root   _  SpaceAfter=No
+3  .        .       PUNCT  _  _  2  punct  _  _
+
+# sent_id = sample1-2
+1  He       he      PRON   _  _  2  nsubj  _  Entity=(e1)
+2  left     leave   VERB   _  _  0  root   _  SpaceAfter=No
+3  .        .       PUNCT  _  _  2  punct  _  _</pre>
+<p>Для официального скорера каждое предложение должно иметь <code># sent_id</code>, а файл — заголовок <code># global.Entity</code>; если
+заголовка нет (как в учебном примере), стенд добавляет стандартный <code>eid-etype-head-other</code> сам.</p>
+<div class="note"><b>Не поддерживается:</b> многословные токены (строки <code>3-4</code>) — их форма отбрасывается при восстановлении текста;
+разрывные упоминания (<code>e1[1/2]</code>) — маркеры трактуются как часть идентификатора.</div>
+
+<h2>7. Параметры командной строки</h2>
+<table>
+<tr><th>Параметр</th><th>Описание</th></tr>
+<tr><td><code>--corpus PATH</code></td><td>Файл <code>.conllu</code> или каталог с ними (обязательно)</td></tr>
+<tr><td><code>--language CODE</code></td><td><code>en</code>, <code>ru</code>, ... — фильтр резолверов/бэкендов и язык LLM-промптов (обязательно)</td></tr>
+<tr><td><code>--resolvers</code></td><td>Через запятую: <code>NoResolution</code>, <code>LapinLiass</code>, <code>SpacyNeural</code>, <code>LLMv2</code>, <code>Gold</code></td></tr>
+<tr><td><code>--graph-backends</code></td><td>Через запятую: <code>RuleBased</code>, <code>LLMv2</code></td></tr>
+<tr><td><code>--output PATH</code></td><td>Каталог результатов (создаётся автоматически)</td></tr>
+<tr><td><code>--coref-match</code> <span class="new">новое</span></td><td>Сопоставление упоминаний в скорере CorefUD: <code>exact</code> (по умолчанию), <code>partial</code>, <code>head</code> (стандарт CRAC). <code>head</code>/<code>partial</code> — только для корпусов с синтаксисом (GUM, CorefUD)</td></tr>
+<tr><td><code>--llm-endpoint URL</code> <span class="new">новое</span></td><td>OpenAI-совместимый сервер (например <code>http://127.0.0.1:8081/v1</code>) вместо загрузки модели в процесс</td></tr>
+<tr><td><code>--llm-model NAME</code></td><td>Модель HuggingFace (по умолчанию <code>Qwen/Qwen2-1.5B-Instruct</code>) или, с <code>--llm-endpoint</code>, имя модели на сервере</td></tr>
+<tr><td><code>--llm-max-new-tokens</code>, <code>--llm-temperature</code> <span class="new">новое</span></td><td>Для <code>--llm-endpoint</code>: 1024 и 0 (жадное декодирование) по умолчанию</td></tr>
+<tr><td><code>--embedding-model</code> <span class="new">новое</span></td><td>Эмбеддинги для дедупликации троек LLMv2; по умолчанию <code>all-mpnet-base-v2</code> для английского и <code>paraphrase-multilingual-mpnet-base-v2</code> для остальных языков</td></tr>
+<tr><td><code>--save-artifacts</code> <span class="new">новое</span></td><td>Сохранить все тексты и графы в <code>&lt;output&gt;/artifacts/</code></td></tr>
+</table>
+<p>Если после фильтрации по языку не осталось ни одной пары «резолвер × бэкенд», стенд завершается ошибкой и не пишет пустой отчёт.</p>
+
+<h2>8. Резолверы, контрольные условия и бэкенды графа</h2>
+<table>
+<tr><th>Имя</th><th>Языки</th><th>Что делает</th><th>Кластеры (CoNLL F1)</th></tr>
+<tr><td><code>NoResolution</code> <span class="new">новое</span></td><td>любой</td><td>Контроль-«пол»: текст без изменений</td><td>нет</td></tr>
+<tr><td><code>LapinLiass</code></td><td>en</td><td>Правиловый резолвер местоимений (spaCy <code>en_core_web_sm</code> + salience)</td><td>да</td></tr>
+<tr><td><code>SpacyNeural</code></td><td>en</td><td>Нейросетевой <code>en_coreference_web_trf</code> (вне Docker-образа, см. раздел 2)</td><td>да</td></tr>
+<tr><td><code>LLMv2</code></td><td>любой язык с <code>prompts/coreference_&lt;lang&gt;.txt</code> (en, ru)</td><td>LLM переписывает местоимения и указательные слова полными именами</td><td>нет</td></tr>
+<tr><td><code>Gold</code> <span class="new">новое</span></td><td>любой</td><td>Контроль-«потолок»: золотой текст и золотые кластеры. CoNLL F1 обязан быть 1,0 (проверка пути оценки); графовые метрики — шумовой потолок бэкенда</td><td>да</td></tr>
+</table>
+<table>
+<tr><th>Бэкенд</th><th>Языки</th><th>Источник</th></tr>
+<tr><td><code>RuleBased</code></td><td>en</td><td>Синтаксический разбор spaCy (<code>en_core_web_lg</code>) + лемматизация WordNet; детерминирован</td></tr>
+<tr><td><code>LLMv2</code></td><td>en, ru</td><td>LLM: извлечение троек по чанкам → нормализация → дедупликация (эмбеддинги) → сборка графа</td></tr>
+</table>
+<p>Почему нужен <code>Gold</code>: LLM-бэкенд не вполне воспроизводим — один и тот же текст, извлечённый дважды, даёт немного разные
+графы. Поэтому oracle-граф против самого себя не даёт 1,0, и реальные резолверы надо сравнивать с этим потолком, а не с единицей.</p>
+
+<h2>9. LLM-компоненты через OpenAI-совместимый сервер <span class="new">новое</span></h2>
+<p>Встроенный клиент LLMv2 загружает модель в процесс эксперимента (по умолчанию Qwen2-1.5B на CPU). Клиент
+<code>pipeline/llm/openai_client.py</code> вместо этого отправляет те же промпты уже работающему серверу (llama-server, vLLM,
+<code>/v1</code> Ollama). Выбранные значения и причины:</p>
+<ul>
+  <li><b>temperature 0</b> — воспроизводимость (встроенный клиент сэмплирует при 0,3);</li>
+  <li><b>1024 токена ответа</b> — встроенные 256 обрезают переписывание окна из 5 предложений (особенно на русском) и длинные
+    списки троек, то есть портят именно сравниваемые тексты и графы;</li>
+  <li><b>без «размышлений»</b> (<code>enable_thinking = false</code>) — промпты требуют прямого переписывания или JSON.</li>
+</ul>
+<p>Параметры и расход токенов записываются в <code>run_config.json</code>. На общем сервере эксперимент занимает слоты наравне с другими
+пользователями: на хосте corpus-host каталогизатор документов уступает им все слоты, коллегам остаётся не меньше двух.</p>
+
+<h2>10. Формат и чтение результатов</h2>
+<table>
+<tr><th>Файл</th><th>Содержимое</th></tr>
+<tr><td><code>results.json</code></td><td>Для каждой пары «резолвер × бэкенд»: кореференционные метрики на уровне корпуса (<code>coreference_metrics</code>, у документов — <code>null</code>), графовые метрики по каждому документу и их среднее</td></tr>
+<tr><td><code>report.html</code></td><td>Сводная таблица: резолвер, бэкенд, CoNLL F1, Node/Edge/Smatch F1, доли дублей</td></tr>
+<tr><td><code>coref/key.conllu</code>, <code>coref/&lt;резолвер&gt;.response.conllu</code> <span class="new">новое</span></td><td>Файлы, по которым считалась кореференция; их можно переоценить скорером с другими параметрами без повторного прогона</td></tr>
+<tr><td><code>run_config.json</code> <span class="new">новое</span></td><td>Аргументы запуска, модель эмбеддингов, параметры LLM и расход токенов</td></tr>
+<tr><td><code>artifacts/texts/&lt;резолвер|ORACLE&gt;/&lt;doc&gt;.txt</code> <span class="new">новое</span></td><td>Тексты после разрешения (при <code>--save-artifacts</code>)</td></tr>
+<tr><td><code>artifacts/graphs/&lt;бэкенд&gt;/&lt;резолвер|ORACLE&gt;/&lt;doc&gt;.json</code> <span class="new">новое</span></td><td>Построенные графы</td></tr>
+</table>
+<pre>"coreference_metrics": {
+  "muc": {"precision": 0.43, "recall": 0.09, "f1": 0.15}, "b_cubed": {...}, "ceafe": {...},
+  "conll_f1": 0.141, "scorer": "corefud-scorer", "match": "exact", "scope": "corpus",
+  "dropped_cross_sentence_mentions": 0, "dropped_gold_cross_sentence_mentions": 0 }</pre>
+
+<h2>11. Метрики и официальный скорер CorefUD</h2>
+<h3>Кореференция <span class="new">изменено</span></h3>
+<p>MUC, B³, CEAFe и CoNLL F1 (их среднее) считает <b>официальный скорер CorefUD</b> (скорер шейред-тасков CRAC, ÚFAL) — <b>один раз на
+весь корпус</b> (микроусреднение по документам), а не как среднее по документам; поэтому числа сопоставимы с опубликованными
+результатами. Синглтоны игнорируются (по умолчанию скорера), нулевые упоминания сопоставляются методом <code>dependent</code>.</p>
+<p>Стенд пишет ответ резолвера как построчную копию золотого файла, в которой вся золотая кореференция удалена, а предсказанные
+кластеры записаны скобками CorefUD 1.0. Ключ (<code>key.conllu</code>) переписывается из золотых кластеров по тому же правилу
+(схема <code>eid-etype-head-other</code>, вершина упоминания — первое слово, чей синтаксический родитель вне упоминания). Иначе при
+<code>head</code> золото против самого себя давало на GUM CoNLL F1 = 0,53: в схеме атрибутов GUM нет поля вершины. Проверено: золото против
+золота = 1,0 на GUM test при всех трёх режимах и на всём RuCoCo при <code>exact</code>. Упоминания, пересекающие границу предложения,
+в CorefUD недопустимы: такие отбрасываются и подсчитываются (<code>dropped_*</code>).</p>
+<table>
+<tr><th>Режим</th><th>Когда упоминания совпадают</th></tr>
+<tr><td><code>exact</code></td><td>Совпадает весь набор слов</td></tr>
+<tr><td><code>partial</code></td><td>Ответ внутри золотого упоминания и содержит его вершину</td></tr>
+<tr><td><code>head</code></td><td>Совпадают вершины (стандарт CRAC; нужен синтаксис)</td></tr>
+</table>
+<h3>Граф</h3>
+<table>
+<tr><th>Метрика</th><th>Что измеряет</th></tr>
+<tr><td>Node P/R/F1</td><td>Совпадение множеств меток узлов predicted- и oracle-графа</td></tr>
+<tr><td>Edge P/R/F1</td><td>Совпадение направленных троек (источник, отношение, приёмник)</td></tr>
+<tr><td>Доля дублей узлов</td><td>Доля узлов одного графа с совпадающей меткой (внутренняя метрика)</td></tr>
+<tr><td>Smatch</td><td>Наилучшее сопоставление вершин, максимизирующее число совпавших троек (алгоритм AMR)</td></tr>
+</table>
+
+<h2>12. Статистический анализ результатов <span class="new">новое</span></h2>
+<pre>python -m pipeline.analysis.summarize RUN_DIR [RUN_DIR ...] --out OUT_DIR --bootstrap 1000</pre>
+<p>Пишет <code>summary.json</code> и <code>summary.md</code>:</p>
+<ul>
+  <li><b>Кореференция:</b> переоценка ответа во всех трёх режимах сопоставления; 95%-й доверительный интервал CoNLL F1 бутстрэпом по
+    документам (документы выбираются с возвращением, каждая выборка оценивается как корпус; повторяющиеся документы
+    переименовываются, чтобы скорер считал их разными).</li>
+  <li><b>Граф:</b> среднее Node/Edge/Smatch F1 с 95%-ми бутстрэп-интервалами; парная бутстрэп-разность с <code>NoResolution</code>
+    (интервал и односторонний p = доля выборок с разностью ≤ 0); <b>gap closed</b> = (R − NoResolution) / (Gold − NoResolution) — доля
+    «бюджета ошибок», которую резолвер отыгрывает относительно контрольного потолка.</li>
+  <li><b>Тексты</b> (из артефактов): местоимения на 1000 слов, отношение длины к исходному тексту, посимвольное сходство с oracle- и
+    с исходным текстом — показывает, насколько резолвер переписывает текст помимо подстановок.</li>
+  <li><b>Графы:</b> средние числа узлов и рёбер. <b>Корпус:</b> документы, токены, упоминания, сущности, доля местоименных упоминаний.</li>
+</ul>
+
+<h2>13. Тестирование стенда</h2>
+<pre>./run.sh tests                     # в Docker-образе: 109 тестов, 0 падений
+pytest tests/pipeline/test_corefud_scoring.py -v</pre>
+<p>Обращения к тяжёлым зависимостям (spaCy-модели, LLM, код <code>text-corpuses-processing</code>) в тестах заменены поддельными модулями
+через <code>sys.modules</code>. Тесты, вызывающие официальный скорер, пропускаются, если он не установлен (<code>COREFUD_SCORER</code>); тесты
+конвертера RuCoCo — если не установлен spaCy. Полный набор выполняется в Docker-образе.</p>
+
+<h2>14. Известные ограничения</h2>
+<table>
+<tr><th>Ограничение</th><th>Пояснение</th></tr>
+<tr><td>Русский резолвер без кластеров</td><td>Для русского есть только <code>LLMv2</code>: он переписывает текст, но не сообщает спаны, поэтому для русского считается лишь графовая метрика (CoNLL F1 — только у контроля <code>Gold</code>)</td></tr>
+<tr><td>SpacyNeural вне образа</td><td>Требует Python 3.8–3.10 и spaCy 3.4–3.5, несовместим с остальным стеком</td></tr>
+<tr><td>Один прогон на условие</td><td>Жадное декодирование вместо ≥3 случайных инициализаций плана; разброс LLM-бэкенда оценивается контролем <code>Gold</code></td></tr>
+<tr><td>Нет CorefUD целиком</td><td>LINDAT недоступен (HTTP 451) — испанский, хинди, корейский и данные с нулевой анафорой (H2) пока недоступны</td></tr>
+<tr><td>RuCoCo без синтаксиса</td><td>Только сопоставление <code>exact</code>; расщеплённые антецеденты не оцениваются скорером</td></tr>
+<tr><td>Разрывные упоминания, многословные токены</td><td>Не поддерживаются загрузчиком (раздел 6)</td></tr>
+<tr><td>Дубли узлов у RuleBased</td><td>Всегда 0: <code>merge_graph</code> хранит узлы как множество</td></tr>
+<tr><td>Совместная (joint) архитектура</td><td>Предмет следующего этапа (задача 4 плана)</td></tr>
+</table>
+
+<h2>15. Расширение стенда</h2>
+<h3>Новый резолвер</h3>
+<pre>class MyResolverAdapter:
+    name = "MyResolver"
+    language_support = {"en", "ru"}          # или "any"
+
+    def resolve(self, doc: CorefDocument) -&gt; ResolverOutput:
+        ...
+        return ResolverOutput(resolved_text=..., clusters=...)   # clusters=None, если спанов нет</pre>
+<p>Кластеры (<code>MentionSpan</code>) — в координатах золотой токенизации (<code>doc.tokens</code>); для проекции используйте
+<code>project_char_span_to_gold_tokens</code> из <code>pipeline.resolvers.base</code>. Стороннее импортируйте внутри <code>resolve()</code>.</p>
+<h3>Новый бэкенд</h3>
+<pre>class MyGraphAdapter:
+    name = backend_name = "MyBackend"
+    language_support = "any"
+    def build(self, text: str) -&gt; dict: ...       # {"nodes": [...], "edges": [...]}</pre>
+<p>Зарегистрируйте имя в <code>_build_resolver</code> / <code>_build_graph_backend</code> (<code>pipeline/run_experiment.py</code>) и покройте
+адаптер тестами. Новый язык для LLMv2 — это два промпт-файла (<code>coreference_&lt;lang&gt;.txt</code>, <code>extraction_&lt;lang&gt;.txt</code>) в
+<code>text-corpuses-processing/dags/llm_v2/prompts/</code>; новый корпус — CoNLL-U с <code>Entity=</code>, <code># sent_id</code> и
+<code># global.Entity</code>.</p>
+
+<h2>16. Частые вопросы и типичные ошибки</h2>
+<h3><code>coreference_metrics: null</code> у LLMv2 или NoResolution — это ошибка?</h3>
+<p>Нет: эти резолверы не выдают кластеры (раздел 8). Для них считаются только графовые метрики.</p>
+<h3>«CorefUD scorer not found»</h3>
+<p>Скорер не установлен или не задан <code>COREFUD_SCORER</code>. В Docker-образе он уже есть.</p>
+<h3>Скорер падает с «No global.Entity header found»</h3>
+<p>В ключе нет заголовка <code># global.Entity</code>. Стенд добавляет его сам; при ручном запуске скорера добавьте строку
+<code># global.Entity = eid-etype-head-other</code> в начало файла. Файл также должен оканчиваться пустой строкой.</p>
+<h3>Золото против золота меньше 1,0</h3>
+<p>Для кореференции такого быть не должно — это ошибка пути оценки. Для графа LLM-бэкенда это нормально: так измеряется его шумовой
+потолок (раздел 8).</p>
+<h3>Контейнер не достаёт до <code>127.0.0.1:8081</code></h3>
+<p>Запускайте через <code>run.sh</code> (сеть хоста). Проверка: <code>curl 127.0.0.1:8081/v1/models</code> на хосте.</p>
+<h3>Прогон LLMv2 идёт медленно</h3>
+<p>Каждый граф — десятки запросов к LLM (один на чанк из трёх предложений). Ориентиры — в разделе 5; ход виден в логе по строкам
+«Extracting triplets».</p>
+<h3>Почему нет испанского, хинди, корейского</h3>
+<p>Их данные с одинаковой разметкой есть только в CorefUD (LINDAT), недоступном с хоста эксперимента. Решение о языковом наборе
+принимается вместе с научным руководителем.</p>
+
+<p class="footer">Документ обновлён 5 октября 2026 г. по состоянию ветки <code>cascade-experimental-stand</code> (109 тестов). См. также
+<code>README.md</code>, <code>experimental-stand-scheme.pdf</code>, <code>docs/superpowers/specs/</code>.</p>
+</body>
+</html>

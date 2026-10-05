@@ -116,12 +116,15 @@ coreference/
       penman_convert.py         # конвертация графа в AMR-строку для smatch
     eval/
       corefud_scoring.py        # файлы key/response + официальный скорер CorefUD (уровень корпуса)
+    llm/openai_client.py        # LLM через OpenAI-совместимый сервер (--llm-endpoint)
+    analysis/summarize.py       # таблицы с бутстрэп-интервалами, диагностика текстов и графов
       graph_scoring.py          # P/R по узлам/рёбрам, доля дублей, Smatch-балл
     report.py                   # сборка results.json и report.html
     run_experiment.py           # оркестрация прогона + точка входа CLI
   data/corpora/
     sample_en_mini.conllu       # маленький пример корпуса для проверки
-  tests/pipeline/               # тесты (97 тестов)
+  tests/pipeline/               # тесты (109 тестов)
+  docs/manual-ru.html           # исходник manual-ru.pdf (печать в PDF через Chrome)
   docker/                       # Dockerfile и run.sh для запуска в контейнере
   docs/superpowers/
     specs/                      # дизайн-документ
@@ -245,7 +248,9 @@ MISC). Поддерживаются:
 |---|---|---|---|
 | `LapinLiass` | только `en` | правило-ориентированный резолвер `text-corpuses-processing` (spaCy `en_core_web_sm` + эвристика salience) | да |
 | `SpacyNeural` | только `en` | нейросетевой резолвер spaCy (`en_coreference_web_trf`) | да |
-| `LLMv2` | любой язык с файлом `prompts/coreference_<lang>.txt` в `text-corpuses-processing/dags/llm_v2/` (сейчас `en`, `ru`) | локальная LLM, переписывающая текст | **нет** — только текст, без спанов упоминаний |
+| `LLMv2` | любой язык с файлом `prompts/coreference_<lang>.txt` в `text-corpuses-processing/dags/llm_v2/` (сейчас `en`, `ru`) | LLM, переписывающая текст (в процессе или через `--llm-endpoint`) | **нет** — только текст, без спанов упоминаний |
+| `NoResolution` | любой | контроль: текст без изменений (нижняя граница) | нет |
+| `Gold` | любой | контроль: золотой текст и кластеры; CoNLL F1 = 1,0, графовые метрики — шумовой потолок бэкенда | да |
 
 Резолвер `LLMv2` намеренно не даёт кореференционных метрик: он переписывает
 текст, но не сообщает, какой фрагмент заменил какое упоминание. Для него
@@ -350,7 +355,7 @@ pytest        # все тесты, без внешних моделей — то
 pytest -v     # подробный вывод
 ```
 
-**97 тестов, 0 падений** (в Docker-образе). Тесты не требуют установленного
+**109 тестов, 0 падений** (в Docker-образе). Тесты не требуют установленного
 `text-corpuses-processing`, spaCy-моделей или скачанных LLM — все обращения к
 тяжёлым зависимостям заменены на поддельные модули через `sys.modules`.
 Исключения: тесты, вызывающие официальный скорер CorefUD, пропускаются, если
