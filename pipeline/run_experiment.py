@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -14,10 +15,16 @@ from .report import build_results, render_html_report, save_html_report, save_re
 from .resolvers.base import supports_language
 from .resolvers.lapin_liass_adapter import LapinLiassAdapter
 from .resolvers.llm_v2_adapter import LLMv2Adapter
+from .resolvers.gold_adapter import GoldAdapter
+from .resolvers.no_resolution_adapter import NoResolutionAdapter
 from .resolvers.spacy_neural_adapter import SpacyNeuralAdapter
 
 
 def _build_resolver(name: str, language: str, llm_client=None):
+    if name == "NoResolution":
+        return NoResolutionAdapter()
+    if name == "Gold":
+        return GoldAdapter()
     if name == "LapinLiass":
         return LapinLiassAdapter()
     if name == "SpacyNeural":
@@ -89,7 +96,11 @@ def run_experiment(
     llm_client=None,
     embedder=None,
     coref_match: str = "exact",
+    save_artifacts: bool = False,
 ) -> Path:
+    """... ``save_artifacts`` keeps every resolved text and graph under ``<output>/artifacts/``
+    (texts/<resolver or ORACLE>/<doc>.txt, graphs/<backend>/<resolver or ORACLE>/<doc>.json)
+    for error analysis."""
     if coref_match not in MATCH_MODES:
         raise ValueError(f"coref_match must be one of {MATCH_MODES}, not {coref_match!r}")
     documents = load_corefud_corpus(corpus_path)
@@ -144,10 +155,23 @@ def run_experiment(
     key_path = coref_dir / "key.conllu"
     key_path.write_text(key_text, encoding="utf-8")
 
+    def save(rel_path: str, content) -> None:
+        if not save_artifacts:
+            return
+        path = output_dir / "artifacts" / rel_path.replace(":", "_")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False, default=str)
+        path.write_text(text, encoding="utf-8")
+
+    for doc, oracle_text in zip(documents, oracle_texts):
+        save(f"texts/ORACLE/{doc.doc_id}.txt", oracle_text)
+
     per_pairing = []
     for resolver_name, resolver in resolvers:
         # Exactly one resolve() call per (resolver, document).
         resolver_outputs = [resolver.resolve(doc) for doc in documents]
+        for doc, out in zip(documents, resolver_outputs):
+            save(f"texts/{resolver_name}/{doc.doc_id}.txt", out.resolved_text)
         coref_metrics = _score_resolver(resolver_name, documents, resolver_outputs, key_path,
                                         key_text, coref_dir, coref_match)
         if coref_metrics is not None:
@@ -161,10 +185,12 @@ def run_experiment(
                 cache_key = (backend_name, doc_index)
                 if cache_key not in oracle_graph_cache:
                     oracle_graph_cache[cache_key] = graph_backend.build(oracle_texts[doc_index])
+                    save(f"graphs/{backend_name}/ORACLE/{doc.doc_id}.json", oracle_graph_cache[cache_key])
                 oracle_graph = oracle_graph_cache[cache_key]
 
                 # Genuinely depends on both resolver and backend: computed R x B.
                 predicted_graph = graph_backend.build(resolver_output.resolved_text)
+                save(f"graphs/{backend_name}/{resolver_name}/{doc.doc_id}.json", predicted_graph)
 
                 graph_metrics = compute_graph_scores(oracle_graph, predicted_graph, graph_backend.backend_name)
 
@@ -198,7 +224,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--resolvers", required=True, help="comma-separated resolver names")
     parser.add_argument("--graph-backends", required=True, help="comma-separated graph backend names")
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--llm-model", default=None, help="HF model name; required for the LLMv2 resolver/backend")
+    parser.add_argument("--llm-model", default=None,
+                        help="LLM for the LLMv2 resolver/backend: a Hugging Face model name loaded in-process "
+                             "(default Qwen/Qwen2-1.5B-Instruct), or with --llm-endpoint the model name the "
+                             "endpoint serves")
+    parser.add_argument("--llm-endpoint", default=None,
+                        help="OpenAI-compatible base URL (e.g. http://127.0.0.1:8081/v1): send LLMv2 prompts "
+                             "to an already served model instead of loading one in-process")
+    parser.add_argument("--llm-max-new-tokens", type=int, default=1024,
+                        help="output token limit with --llm-endpoint (LLMv2's in-process default is 256)")
+    parser.add_argument("--llm-temperature", type=float, default=0.0,
+                        help="sampling temperature with --llm-endpoint (0 = greedy, reproducible)")
+    parser.add_argument("--embedding-model", default=None,
+                        help="sentence-transformers model for LLMv2 triple deduplication; default "
+                             "all-mpnet-base-v2 (LLMv2's configured one) for English, "
+                             "paraphrase-multilingual-mpnet-base-v2 for other languages")
+    parser.add_argument("--save-artifacts", action="store_true",
+                        help="keep every resolved text and graph under <output>/artifacts/")
     parser.add_argument("--coref-match", choices=MATCH_MODES, default="exact",
                         help="CorefUD scorer mention matching (default: exact; 'head' needs mention "
                              "heads in the gold data, e.g. CorefUD/GUM, not converted RuCoCo)")
@@ -209,16 +251,28 @@ def main(argv: list[str] | None = None) -> int:
 
     llm_client = None
     embedder = None
+    run_config = {"argv": argv if argv is not None else sys.argv[1:]}
     if "LLMv2" in resolver_names or "LLMv2" in backend_names:
         from .sys_path_setup import add_text_corpuses_processing_to_path
 
         add_text_corpuses_processing_to_path()
         from llm_v2.config_schema import EmbeddingConfig, LLMConfig
         from llm_v2.models.embedder import Embedder
-        from llm_v2.models.llm_client import LLMClient
 
-        llm_client = LLMClient(LLMConfig(model_name=args.llm_model or "Qwen/Qwen2-1.5B-Instruct"))
-        embedder = Embedder(EmbeddingConfig())
+        if args.llm_endpoint:
+            from .llm.openai_client import OpenAICompatibleClient
+
+            llm_client = OpenAICompatibleClient(args.llm_endpoint, args.llm_model or "default",
+                                                max_new_tokens=args.llm_max_new_tokens,
+                                                temperature=args.llm_temperature)
+        else:
+            from llm_v2.models.llm_client import LLMClient
+
+            llm_client = LLMClient(LLMConfig(model_name=args.llm_model or "Qwen/Qwen2-1.5B-Instruct"))
+        embedding_model = args.embedding_model or (
+            "all-mpnet-base-v2" if args.language == "en" else "paraphrase-multilingual-mpnet-base-v2")
+        embedder = Embedder(EmbeddingConfig(model_name=embedding_model))
+        run_config["embedding_model"] = embedding_model
 
     results_path = run_experiment(
         corpus_path=args.corpus,
@@ -229,7 +283,11 @@ def main(argv: list[str] | None = None) -> int:
         llm_client=llm_client,
         embedder=embedder,
         coref_match=args.coref_match,
+        save_artifacts=args.save_artifacts,
     )
+    if hasattr(llm_client, "usage"):
+        run_config["llm"] = llm_client.usage()
+    (results_path.parent / "run_config.json").write_text(json.dumps(run_config, indent=1), encoding="utf-8")
     print(f"Results written to {results_path}")
     return 0
 
