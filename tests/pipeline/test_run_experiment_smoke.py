@@ -5,7 +5,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+import pytest
+
+from pipeline.eval.corefud_scoring import scorer_available
 from pipeline.run_experiment import run_experiment
+
+# runs that produce coreference clusters are scored with the official CorefUD scorer
+needs_scorer = pytest.mark.skipif(not scorer_available(), reason="official CorefUD scorer not installed")
 
 FIXTURE_CORPUS = Path(__file__).resolve().parents[2] / "data" / "corpora" / "sample_en_mini.conllu"
 
@@ -112,6 +118,7 @@ def _install_fake_graph_metrics_module(monkeypatch):
     monkeypatch.setitem(sys.modules, "graphMetrics", fake)
 
 
+@needs_scorer
 def test_run_experiment_end_to_end_produces_results_json(monkeypatch, tmp_path):
     _install_fake_resolver_module(monkeypatch)
     _install_fake_graph_builder_module(monkeypatch)
@@ -137,6 +144,9 @@ def test_run_experiment_end_to_end_produces_results_json(monkeypatch, tmp_path):
     assert pairing["resolver"] == "LapinLiass"
     assert pairing["graph_backend"] == "RuleBased"
     assert pairing["coreference_metrics"]["conll_f1"] == 1.0  # LapinLiass resolves He->John, matching gold e1
+    assert pairing["coreference_metrics"]["scope"] == "corpus"  # official CorefUD scorer, whole corpus
+    assert (output_dir / "coref" / "key.conllu").exists()
+    assert (output_dir / "coref" / "LapinLiass.response.conllu").exists()
     # Finding 6b: duplication rate is aggregated to the pairing level, not
     # left buried in the per-document entries.
     assert pairing["graph_metrics"]["oracle_node_duplication_rate"] == 0.0
@@ -270,6 +280,7 @@ def test_resolve_runs_once_per_resolver_document_and_oracle_graph_once_per_backe
             assert backend.built_texts.count(oracle_text) == 1
 
 
+@needs_scorer
 def test_restructured_loop_produces_the_same_results_as_before(monkeypatch, tmp_path):
     """The hoisting must be a pure performance/determinism change."""
     _install_fake_resolver_module(monkeypatch)

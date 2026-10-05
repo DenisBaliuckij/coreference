@@ -6,7 +6,7 @@ from pathlib import Path
 
 from .corpus.corefud_loader import load_corefud_corpus
 from .corpus.oracle import build_oracle_text
-from .eval.coref_scoring import score_coreference
+from .eval.corefud_scoring import MATCH_MODES, normalized_key, score_corpus, write_response
 from .eval.graph_scoring import compute_graph_scores
 from .graph.llm_v2_graph_adapter import LLMv2GraphAdapter
 from .graph.rule_based_graph_adapter import RuleBasedGraphAdapter
@@ -39,11 +39,26 @@ def _build_graph_backend(name: str, language: str, llm_client=None, embedder=Non
     raise ValueError(f"unknown graph backend: {name}")
 
 
-def _average_coref(doc_entries: list[dict]) -> dict | None:
-    values = [e["coreference_metrics"] for e in doc_entries if e["coreference_metrics"] is not None]
-    if not values:
+def _read_key_text(corpus_path: Path) -> str:
+    """The gold CoNLL-U exactly as the loader reads it (a directory = its *.conllu, sorted)."""
+    corpus_path = Path(corpus_path)
+    if corpus_path.is_dir():
+        return "\n".join(p.read_text(encoding="utf-8").rstrip("\n") + "\n"
+                         for p in sorted(corpus_path.glob("*.conllu")))
+    return corpus_path.read_text(encoding="utf-8")
+
+
+def _score_resolver(resolver_name, documents, resolver_outputs, key_path, key_text, coref_dir, match):
+    """Corpus-level CorefUD score of one resolver, or None if it reports no clusters."""
+    if all(o.clusters is None for o in resolver_outputs):
         return None
-    return {"conll_f1": sum(v["conll_f1"] for v in values) / len(values)}
+    predicted = {doc.doc_id: out.clusters for doc, out in zip(documents, resolver_outputs)}
+    response_text, dropped = write_response(key_text, predicted)
+    response_path = coref_dir / f"{resolver_name}.response.conllu"
+    response_path.write_text(response_text, encoding="utf-8")
+    metrics = score_corpus(key_path, response_path, match=match)
+    metrics["dropped_cross_sentence_mentions"] = dropped
+    return metrics
 
 
 def _average_graph(doc_entries: list[dict]) -> dict:
@@ -73,7 +88,10 @@ def run_experiment(
     output_dir: Path,
     llm_client=None,
     embedder=None,
+    coref_match: str = "exact",
 ) -> Path:
+    if coref_match not in MATCH_MODES:
+        raise ValueError(f"coref_match must be one of {MATCH_MODES}, not {coref_match!r}")
     documents = load_corefud_corpus(corpus_path)
 
     resolvers, skipped_resolvers = [], []
@@ -116,10 +134,24 @@ def run_experiment(
     # reused across every resolver.
     oracle_graph_cache: dict[tuple[str, int], dict] = {}
 
+    # Coreference is scored once per resolver over the whole corpus with the official CorefUD
+    # scorer (micro-averaged, as in the CRAC shared tasks); the gold key is written once.
+    output_dir = Path(output_dir)
+    coref_dir = output_dir / "coref"
+    coref_dir.mkdir(parents=True, exist_ok=True)
+    key_text, dropped_gold = normalized_key(_read_key_text(corpus_path),
+                                            {doc.doc_id: doc.clusters for doc in documents})
+    key_path = coref_dir / "key.conllu"
+    key_path.write_text(key_text, encoding="utf-8")
+
     per_pairing = []
     for resolver_name, resolver in resolvers:
         # Exactly one resolve() call per (resolver, document).
         resolver_outputs = [resolver.resolve(doc) for doc in documents]
+        coref_metrics = _score_resolver(resolver_name, documents, resolver_outputs, key_path,
+                                        key_text, coref_dir, coref_match)
+        if coref_metrics is not None:
+            coref_metrics["dropped_gold_cross_sentence_mentions"] = dropped_gold
 
         for backend_name, graph_backend in backends:
             doc_entries = []
@@ -134,15 +166,12 @@ def run_experiment(
                 # Genuinely depends on both resolver and backend: computed R x B.
                 predicted_graph = graph_backend.build(resolver_output.resolved_text)
 
-                coref_metrics = None
-                if resolver_output.clusters is not None:
-                    coref_metrics = score_coreference(doc.clusters, resolver_output.clusters)
-
                 graph_metrics = compute_graph_scores(oracle_graph, predicted_graph, graph_backend.backend_name)
 
                 doc_entries.append({
                     "doc_id": doc.doc_id,
-                    "coreference_metrics": coref_metrics,
+                    # coreference is scored at corpus level only (see the pairing entry)
+                    "coreference_metrics": None,
                     "graph_metrics": graph_metrics,
                 })
 
@@ -150,11 +179,10 @@ def run_experiment(
                 "resolver": resolver_name,
                 "graph_backend": backend_name,
                 "documents": doc_entries,
-                "coreference_metrics": _average_coref(doc_entries),
+                "coreference_metrics": coref_metrics,
                 "graph_metrics": _average_graph(doc_entries),
             })
 
-    output_dir = Path(output_dir)
     run_id = output_dir.name
     results = build_results(run_id, language, per_pairing)
     results_path = save_results_json(results, output_dir)
@@ -171,6 +199,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--graph-backends", required=True, help="comma-separated graph backend names")
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--llm-model", default=None, help="HF model name; required for the LLMv2 resolver/backend")
+    parser.add_argument("--coref-match", choices=MATCH_MODES, default="exact",
+                        help="CorefUD scorer mention matching (default: exact; 'head' needs mention "
+                             "heads in the gold data, e.g. CorefUD/GUM, not converted RuCoCo)")
     args = parser.parse_args(argv)
 
     resolver_names = args.resolvers.split(",")
@@ -197,6 +228,7 @@ def main(argv: list[str] | None = None) -> int:
         output_dir=args.output,
         llm_client=llm_client,
         embedder=embedder,
+        coref_match=args.coref_match,
     )
     print(f"Results written to {results_path}")
     return 0
