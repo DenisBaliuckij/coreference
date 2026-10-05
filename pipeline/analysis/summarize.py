@@ -6,13 +6,13 @@ Per run (an --output directory of run_experiment, ideally with --save-artifacts)
 - coreference: the pairing's corpus-level CorefUD scores, re-scored under every match mode
   from coref/key.conllu and coref/<resolver>.response.conllu, with a document-level bootstrap
   95% CI of CoNLL F1 (documents resampled with replacement, each resample scored as a corpus);
-- graph: mean node/edge/Smatch F1 per resolver x backend with bootstrap 95% CIs over
+- graph: mean node/edge/triple F1 per resolver x backend with bootstrap 95% CIs over
   documents; paired bootstrap differences against NoResolution (CI and one-sided p = share of
   resamples with difference <= 0); "gap closed" = (R - NoResolution) / (Gold - NoResolution),
   the share of the coreference error budget a resolver recovers relative to the Gold control;
 - texts (artifacts/texts): pronoun density per 1000 words, length ratio and character-level
   similarity of each resolver's text to the oracle and to the original text;
-- graphs (artifacts/graphs): mean node and edge counts;
+- graphs (artifacts/graphs): mean node and edge counts and the share of pronoun-labelled nodes;
 - corpus: documents, tokens, mentions, entities, non-singleton entities, pronominal mentions.
 Writes summary.json and summary.md to OUT_DIR.
 """
@@ -27,6 +27,7 @@ import re
 import statistics
 import tempfile
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from ..corpus.corefud_loader import parse_conllu
@@ -98,27 +99,32 @@ def _join_blocks(header: list[str], blocks: list[str]) -> str:
     return (head + "\n" if head else "") + body + "\n\n"
 
 
-def coref_bootstrap(key_path: Path, response_path: Path, match: str, n: int, seed: int = 0) -> tuple[float, float]:
+def coref_bootstrap(key_path: Path, response_path: Path, match: str, n: int, seed: int = 0,
+                    workers: int = 8) -> tuple[float, float]:
     """95% CI of corpus-level CoNLL F1 over documents resampled with replacement; duplicates
-    are renamed so the scorer treats them as separate documents."""
+    are renamed so the scorer treats them as separate documents. The resamples are drawn up
+    front from one seeded generator, so the CI does not depend on ``workers`` (scorer runs are
+    subprocesses, scored in parallel threads)."""
     key_header, key_docs = _split_docs(key_path.read_text(encoding="utf-8"))
     resp_header, resp_docs = _split_docs(response_path.read_text(encoding="utf-8"))
     ids = list(key_docs)
     rng = random.Random(seed)
-    scores = []
-    with tempfile.TemporaryDirectory() as tmp:
-        k_file, r_file = Path(tmp) / "key.conllu", Path(tmp) / "resp.conllu"
-        for i in range(n):
-            pick = [ids[rng.randrange(len(ids))] for _ in ids]
-            k_parts, r_parts = [], []
-            for j, d in enumerate(pick):
-                new = f"{d}__b{j}"
-                k_parts.append(_renamed(key_docs[d], d, new))
-                r_parts.append(_renamed(resp_docs[d], d, new))
+    picks = [[ids[rng.randrange(len(ids))] for _ in ids] for _ in range(n)]
+
+    def score(i: int) -> float:
+        k_parts, r_parts = [], []
+        for j, d in enumerate(picks[i]):
+            new = f"{d}__b{j}"
+            k_parts.append(_renamed(key_docs[d], d, new))
+            r_parts.append(_renamed(resp_docs[d], d, new))
+        with tempfile.TemporaryDirectory() as tmp:
+            k_file, r_file = Path(tmp) / "key.conllu", Path(tmp) / "resp.conllu"
             k_file.write_text(_join_blocks(key_header, k_parts), encoding="utf-8")
             r_file.write_text(_join_blocks(resp_header, r_parts), encoding="utf-8")
-            scores.append(score_corpus(k_file, r_file, match=match)["conll_f1"])
-    scores.sort()
+            return score_corpus(k_file, r_file, match=match)["conll_f1"]
+
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        scores = sorted(pool.map(score, range(n)))
     return scores[int(0.025 * n)], scores[min(n - 1, int(0.975 * n))]
 
 
@@ -156,21 +162,34 @@ def text_diagnostics(art: Path, language: str) -> dict:
     return out
 
 
-def graph_sizes(art: Path) -> dict:
+def _node_labels(g: dict) -> list[str]:
+    return [str(n["label"] if isinstance(n, dict) else n) for n in g.get("nodes") or []]
+
+
+def graph_sizes(art: Path, language: str) -> dict:
+    """Mean node/edge counts and the share of nodes whose whole label is a pronoun.
+
+    Both backends merge nodes by label, so the node duplication rate is structurally 0 and an
+    unresolved anaphor shows up instead as a node labelled "he", "it", "она"...: the pronoun
+    node share is the graph-side trace of coreference left unresolved."""
     out = {}
     graphs_dir = art / "graphs"
     if not graphs_dir.is_dir():
         return out
+    pron = PRONOUNS.get(language, set())
     for backend in sorted(p for p in graphs_dir.iterdir() if p.is_dir()):
         for sub in sorted(p for p in backend.iterdir() if p.is_dir()):
-            nodes, edges = [], []
+            nodes, edges, pron_nodes = [], [], []
             for p in sub.glob("*.json"):
                 g = json.loads(p.read_text(encoding="utf-8"))
-                nodes.append(len(g.get("nodes") or []))
+                labels = _node_labels(g)
+                nodes.append(len(labels))
                 edges.append(len(g.get("edges") or []))
+                pron_nodes.append(sum(1 for lab in labels if lab.strip().lower() in pron))
             if nodes:
-                out[f"{backend.name}/{sub.name}"] = {"mean_nodes": statistics.fmean(nodes),
-                                                    "mean_edges": statistics.fmean(edges), "documents": len(nodes)}
+                out[f"{backend.name}/{sub.name}"] = {
+                    "mean_nodes": statistics.fmean(nodes), "mean_edges": statistics.fmean(edges),
+                    "pronoun_node_share": sum(pron_nodes) / max(1, sum(nodes)), "documents": len(nodes)}
     return out
 
 
@@ -265,7 +284,7 @@ def summarize_run(run: Path, n_boot: int) -> dict:
 
     summary["graph_metrics_rescored_documents"] = rescored
     summary["texts"] = text_diagnostics(art, language)
-    summary["graph_sizes"] = graph_sizes(art)
+    summary["graph_sizes"] = graph_sizes(art, language)
     return summary
 
 
@@ -308,9 +327,10 @@ def to_markdown(summaries: list[dict]) -> str:
                            f"{_f(t['char_similarity_to_oracle'])} | {_f(t['char_similarity_to_original'])} |")
             out.append("")
         if s["graph_sizes"]:
-            out.append("| Graphs | Mean nodes | Mean edges |\n|---|---|---|")
+            out.append("| Graphs | Mean nodes | Mean edges | Pronoun nodes |\n|---|---|---|---|")
             for name, g in s["graph_sizes"].items():
-                out.append(f"| {name} | {_f(g['mean_nodes'], 1)} | {_f(g['mean_edges'], 1)} |")
+                out.append(f"| {name} | {_f(g['mean_nodes'], 1)} | {_f(g['mean_edges'], 1)} | "
+                           f"{g['pronoun_node_share']:.1%} |")
             out.append("")
     return "\n".join(out)
 

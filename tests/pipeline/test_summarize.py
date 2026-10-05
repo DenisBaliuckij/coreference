@@ -42,3 +42,16 @@ def test_resampled_documents_are_separated_by_a_blank_line():
 
     text = _join_blocks(["# global.Entity = x"], ["# newdoc id = a\n1\tx", "# newdoc id = b\n1\ty\n"])
     assert text == "# global.Entity = x\n# newdoc id = a\n1\tx\n\n# newdoc id = b\n1\ty\n\n"
+
+
+def test_graph_sizes_counts_pronoun_labelled_nodes(tmp_path):
+    import json
+
+    from pipeline.analysis.summarize import graph_sizes
+
+    d = tmp_path / "graphs" / "LLMv2" / "NoResolution"
+    d.mkdir(parents=True)
+    g = {"nodes": [{"id": "n0", "label": "John"}, {"id": "n1", "label": "He"}], "edges": [{"source": "n1", "target": "n0"}]}
+    (d / "a.json").write_text(json.dumps(g), encoding="utf-8")
+    s = graph_sizes(tmp_path, "en")["LLMv2/NoResolution"]
+    assert s["pronoun_node_share"] == 0.5 and s["mean_nodes"] == 2 and s["mean_edges"] == 1

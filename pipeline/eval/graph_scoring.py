@@ -91,9 +91,12 @@ def compute_node_duplication_rate(graph_dict: dict, backend: str) -> float:
     Note on the RuleBased backend: graphBuilder.merge_graph stores nodes as
     ``list(set(...))``, so a RuleBased graph dict produced by the real backend
     can never carry duplicate labels and its rate is structurally 0.0. The
-    metric is meaningful for id/label backends (LLMv2), where two distinct node
-    ids may share a label. This function still counts duplicates faithfully for
-    either shape if the dict does contain them.
+    metric was meant for id/label backends (LLMv2), where two distinct node ids
+    could share a label -- but the LLMv2 graph builder also merges nodes by
+    normalised label (checked on the 2026-10-05 GUM run: 0 duplicates in every
+    graph), so on both backends an unresolved anaphor appears as a pronoun-labelled
+    node instead (see analysis.summarize.graph_sizes). This function still counts
+    duplicates faithfully for either shape if the dict does contain them.
     """
     raw_labels = _raw_node_labels(graph_dict, backend)
     if not raw_labels:
