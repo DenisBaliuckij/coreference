@@ -76,8 +76,12 @@
 качество графа.</p>
 <p>Ключевой инструмент — <b>oracle-абляция</b>. Для каждого документа граф строится по двум текстам:</p>
 <ul>
-  <li><b>oracle-граф</b> — по тексту, в котором все упоминания каждой золотой цепочки заменены на форму её первого упоминания
-    (без участия модели). Это верхняя граница: граф при идеальном разрешении кореференции;</li>
+  <li><b>oracle-граф</b> — по тексту, в котором упоминания каждой золотой цепочки заменены на форму её первого упоминания
+    (без участия модели). Это верхняя граница: граф при идеальном разрешении кореференции. Два варианта
+    (<code>--oracle-mode</code>) <span class="new">новое</span>: <code>all</code> заменяет все неначальные упоминания, включая именные
+    (в GUM — и предикатные: «was a Czech composer» → «was Antonín Dvořák»); <code>pronouns</code> — только однословные местоимения,
+    то есть ровно то, что делают резолверы местоимений. Вложенные упоминания: побеждает внешнее (первая версия применяла и
+    вложенную замену и портила текст — исправлено в 2bd843c);</li>
   <li><b>predicted-граф</b> — по тексту, обработанному реальным резолвером.</li>
 </ul>
 <p>Разрыв между ними — «бюджет ошибок», вносимый этапом разрешения кореференции (гипотеза H1 диссертационного плана). Для
@@ -175,7 +179,7 @@ docker build -t coref-experiment:latest --build-arg BUILD_INFO="coreference &lt;
 
 <h2>5. Первый запуск и полный эксперимент</h2>
 <ol class="steps">
-  <li>Соберите образ и проверьте его: <code>./run.sh tests</code> (109 тестов), <code>./run.sh smoke</code> (результат в
+  <li>Соберите образ и проверьте его: <code>./run.sh tests</code> (117 тестов), <code>./run.sh smoke</code> (результат в
     <code>reports/smoke_en/</code>; на учебном примере все метрики равны 1,0).</li>
   <li>Английский эксперимент на тестовой части GUM (все резолверы, оба бэкенда, сопоставление по вершинам — стандарт CRAC):
 <pre>./run.sh python -m pipeline.run_experiment --corpus /corpora/en_gum/test --language en \
@@ -187,6 +191,11 @@ docker build -t coref-experiment:latest --build-arg BUILD_INFO="coreference &lt;
   --resolvers NoResolution,LLMv2,Gold --graph-backends LLMv2 --coref-match exact \
   --llm-endpoint http://127.0.0.1:8081/v1 --llm-model qwen3.8:27b-mtp-128k \
   --save-artifacts --output /reports/full_ru_rucoco_sample150</pre></li>
+  <li>Вариант с oracle только по местоимениям: скопируйте тексты и графы резолверов в новый каталог и продолжите прогон —
+    перестроятся только oracle- и Gold-графы:
+<pre>P=reports/full_en_gum_test_pron; mkdir -p $P/artifacts
+cp -r reports/full_en_gum_test/artifacts/texts reports/full_en_gum_test/artifacts/graphs $P/artifacts/
+./run.sh python -m pipeline.run_experiment ...те же параметры... --oracle-mode pronouns --resume   --output /reports/full_en_gum_test_pron</pre></li>
   <li>Сводка с доверительными интервалами:
 <pre>./run.sh python -m pipeline.analysis.summarize /reports/full_en_gum_test \
   /reports/full_ru_rucoco_sample150 --out /reports/summary --bootstrap 1000</pre></li>
@@ -230,6 +239,8 @@ docker build -t coref-experiment:latest --build-arg BUILD_INFO="coreference &lt;
 <tr><td><code>--llm-max-new-tokens</code>, <code>--llm-temperature</code> <span class="new">новое</span></td><td>Для <code>--llm-endpoint</code>: 1024 и 0 (жадное декодирование) по умолчанию</td></tr>
 <tr><td><code>--embedding-model</code> <span class="new">новое</span></td><td>Эмбеддинги для дедупликации троек LLMv2; по умолчанию <code>all-mpnet-base-v2</code> для английского и <code>paraphrase-multilingual-mpnet-base-v2</code> для остальных языков</td></tr>
 <tr><td><code>--save-artifacts</code> <span class="new">новое</span></td><td>Сохранить все тексты и графы в <code>&lt;output&gt;/artifacts/</code></td></tr>
+<tr><td><code>--resume</code> <span class="new">новое</span></td><td>С <code>--save-artifacts</code>: продолжить прерванный прогон в тот же <code>--output</code>. Сохранённый граф переиспользуется, только если он построен по тому же тексту; тексты LLM-резолвера тоже берутся из артефактов</td></tr>
+<tr><td><code>--oracle-mode</code> <span class="new">новое</span></td><td><code>all</code> (по умолчанию) или <code>pronouns</code> — какие золотые упоминания oracle-текст (и контроль Gold) заменяет первым упоминанием цепочки</td></tr>
 </table>
 <p>Если после фильтрации по языку не осталось ни одной пары «резолвер × бэкенд», стенд завершается ошибкой и не пишет пустой отчёт.</p>
 
@@ -300,7 +311,7 @@ docker build -t coref-experiment:latest --build-arg BUILD_INFO="coreference &lt;
 <tr><th>Метрика</th><th>Что измеряет</th></tr>
 <tr><td>Node P/R/F1</td><td>Совпадение множеств меток узлов predicted- и oracle-графа</td></tr>
 <tr><td>Edge P/R/F1</td><td>Совпадение направленных троек (источник, отношение, приёмник)</td></tr>
-<tr><td>Доля дублей узлов</td><td>Доля узлов одного графа с совпадающей меткой (внутренняя метрика)</td></tr>
+<tr><td>Доля дублей узлов</td><td>Доля узлов одного графа с совпадающей меткой. Оба бэкенда сливают узлы по нормализованной метке, поэтому метрика всегда 0; вместо неё в сводке — доля узлов-местоимений</td></tr>
 <tr><td>Triple F1</td><td>F1 по тройкам «узел + ребро» при выравнивании узлов по совпадению меток (Smatch с фиксированным выравниванием). Поиск выравнивания Smatch на графах документа не масштабируется (3&nbsp;ГБ на 200 узлах, нехватка памяти на 450) и в графах, где узел определяется меткой, может лишь сопоставить разные сущности</td></tr>
 </table>
 
@@ -316,11 +327,20 @@ docker build -t coref-experiment:latest --build-arg BUILD_INFO="coreference &lt;
     «бюджета ошибок», которую резолвер отыгрывает относительно контрольного потолка.</li>
   <li><b>Тексты</b> (из артефактов): местоимения на 1000 слов, отношение длины к исходному тексту, посимвольное сходство с oracle- и
     с исходным текстом — показывает, насколько резолвер переписывает текст помимо подстановок.</li>
-  <li><b>Графы:</b> средние числа узлов и рёбер. <b>Корпус:</b> документы, токены, упоминания, сущности, доля местоименных упоминаний.</li>
+  <li><b>Графы:</b> средние числа узлов и рёбер и доля узлов, чья метка целиком — местоимение (след неразрешённой анафоры).
+    <b>Корпус:</b> документы, токены, упоминания, сущности, доля местоименных упоминаний.</li>
+</ul>
+<p>Два дополнительных анализа по сохранённым текстам:</p>
+<pre>python -m pipeline.analysis.replacement_agreement RUN_DIR/artifacts/texts LLMv2,LapinLiass
+python -m pipeline.analysis.dropped_passages RUN_DIR/artifacts/texts LLMv2,LapinLiass [--min-words 10]</pre>
+<ul>
+  <li><b>replacement_agreement</b> — что резолвер написал там, где oracle заменил одно слово (местоимение): ту же строку, другую строку
+    с общим словом (обычно другое имя того же референта), строку без общих слов или ничего.</li>
+  <li><b>dropped_passages</b> — сколько слов исходного текста резолвер выбросил фрагментами от 10 слов (пропущенные предложения).</li>
 </ul>
 
 <h2>13. Тестирование стенда</h2>
-<pre>./run.sh tests                     # в Docker-образе: 109 тестов, 0 падений
+<pre>./run.sh tests                     # в Docker-образе: 117 тестов, 0 падений
 pytest tests/pipeline/test_corefud_scoring.py -v</pre>
 <p>Обращения к тяжёлым зависимостям (spaCy-модели, LLM, код <code>text-corpuses-processing</code>) в тестах заменены поддельными модулями
 через <code>sys.modules</code>. Тесты, вызывающие официальный скорер, пропускаются, если он не установлен (<code>COREFUD_SCORER</code>); тесты
